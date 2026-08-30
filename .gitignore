@@ -1,0 +1,28 @@
+# Build output
+build/
+dist/
+out/
+CMakeUserPresets.json
+
+# Compiled and intermediate artefacts
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.a
+*.lib
+
+# Packaged and delivered archives - rebuild them with package.bat
+*.zip
+
+# Runtime files the game writes next to itself
+acah_save.txt
+
+# Debug renders
+*.ppm
+
+# Editors
+.vs/
+.vscode/
+.idea/
