@@ -124,6 +124,39 @@ int main(int argc, char** argv) {
                     static_cast<double>(rightness * 100.0f));
     }
 
+    // ------------------------------------------------------------ gamepad --
+    // The analog path: a stick pushed right goes to the camera's right, and a
+    // half-pushed stick walks at roughly half pace. The keys are booleans
+    // that always mean full throttle, so this is the only place the
+    // deflection-is-throttle rule gets exercised.
+    {
+        Game g;
+        g.init(4242u, 160, 48, 1);
+        g.setCellAspect(0.5f);
+        deploy(g);
+        const Vec3 s0 = g.player().position();
+        const Vec3 camRight = normalize(flattenY(g.camera().right));
+        InputState st;
+        st.moveX = 1.0f;
+        float peakFull = 0.0f;
+        for (int i = 0; i < 90; ++i) { g.update(dt, st); peakFull = std::max(peakFull, g.player().speed()); }
+        const Vec3 d = flattenY(g.player().position() - s0);
+        const float rightness = (length(d) > 1e-3f) ? dot(normalize(d), camRight) : 0.0f;
+        Game g2;
+        g2.init(4242u, 160, 48, 1);
+        g2.setCellAspect(0.5f);
+        deploy(g2);
+        InputState half;
+        half.moveY = 0.5f;
+        float peakHalf = 0.0f;
+        for (int i = 0; i < 90; ++i) { g2.update(dt, half); peakHalf = std::max(peakHalf, g2.player().speed()); }
+        std::printf("STICK   full right stick goes %.0f%% to the camera's right at %.1f m/s; "
+                    "half forward walks at %.1f m/s (%.0f%%)\n",
+                    static_cast<double>(rightness * 100.0f), static_cast<double>(peakFull),
+                    static_cast<double>(peakHalf),
+                    static_cast<double>(peakHalf / std::max(peakFull, 0.1f) * 100.0f));
+    }
+
     // ------------------------------------------------------- camera drift --
     {
         Game g;

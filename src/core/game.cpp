@@ -76,16 +76,21 @@ void Game::startMission() {
 
     mission_.begin(level_, profile_);
     render_ = mission_.world().arena().render;
+    cabinLayout_ = cabinLayoutFor(profile_.loadout);
     screen_ = GameScreen::Briefing;
     screenTimer_ = 0.0f;
 
     const Mech& p = mission_.player();
     camFocus_ = p.position() + Vec3(0.0f, 1.4f, 0.0f);
-    camUp_ = p.up();
+    // World up, not the hull's: a machine spawned on a slope would otherwise
+    // hand the camera a tilted frame that it then slewed level, and the
+    // transport through that slew is a few degrees of yaw for free.
+    camUp_ = Vec3(0.0f, 1.0f, 0.0f);
     // Start the orbit frame looking along the machine's heading. From here on
     // the reference is carried forward independently, so camYaw_ stays a plain
     // offset from it rather than an absolute world angle.
     camRefFwd_ = normalize(flattenY(p.forward()) + Vec3(0.0f, 0.0f, 1e-4f));
+    camOrbitDir_ = camRefFwd_;
     camYaw_ = 0.0f;
     camPitch_ = kPitchStart;
     camPos_ = camFocus_ - camRefFwd_ * camDist_ +
@@ -137,9 +142,30 @@ MechInput Game::buildPlayerInput(const InputState& in) const {
     // is standing on. That projection is what makes "forward" mean the same
     // thing on flat ground and halfway up a wall.
     const Mech& p = mission_.player();
-    const Vec3 up = p.up();
+    // On the ground the drive frame is the WORLD's horizontal, not the
+    // hull's tangent plane. Building "right" as cross(camera forward
+    // projected onto the hull plane, hull up) is exact on a wall and subtly
+    // wrong everywhere else: the hull pitches a few degrees with every
+    // slope and with its own motion, and a strafe built in that plane picks
+    // up a component along the camera axis whose sign follows the pitch.
+    // Measured: 0.04-0.09 of the drive vector pointed downhill in BOTH
+    // strafe directions on a hillside, which is 0.5-1.0 m/s of travel the
+    // pilot never asked for - the machine sidled toward the camera the whole
+    // time it was dodging. Same blend the camera uses: level frame on the
+    // ground, surface frame once the machine is genuinely on a face.
+    const Vec3 worldUp(0.0f, 1.0f, 0.0f);
+    const float onWall = clampf((p.climbFraction() - 0.10f) / 0.20f, 0.0f, 1.0f);
+    Vec3 up = lerp(worldUp, p.up(), onWall);
+    up = (lengthSq(up) > 1e-6f) ? normalize(up) : worldUp;
 
-    Vec3 camFwd = normalize(camFocus_ - camPos_);
+    // The ORBIT direction, not the line from the boom to the focus. The boom
+    // trails the machine at a finite rate, so while strafing at 12 m/s the
+    // line from camera to focus swings a few degrees toward the direction
+    // of travel and back - and a strafe built from that line picks up a
+    // component along the view that changes sign with the swing. Over a
+    // fourteen-second dodge that summed to metres of sidle. The orbit
+    // direction is what the mouse set and does not care where the boom is.
+    Vec3 camFwd = camOrbitDir_;
     Vec3 fwd = camFwd - up * dot(camFwd, up);
     if (lengthSq(fwd) < 0.12f) {
         // The camera is looking nearly straight along the surface normal. That
@@ -170,6 +196,14 @@ MechInput Game::buildPlayerInput(const InputState& in) const {
     if (in.back) move -= fwd;
     if (in.right) move += rightV;
     if (in.left) move -= rightV;
+    // A stick adds on top of the keys. Its deflection is the throttle: the
+    // keys are always full, a stick can walk.
+    float stickMag = 0.0f;
+    if (std::fabs(in.moveX) > 1e-3f || std::fabs(in.moveY) > 1e-3f) {
+        const Vec3 stick = fwd * in.moveY + rightV * in.moveX;
+        stickMag = clampf(length(stick), 0.0f, 1.0f);
+        move += stick;
+    }
 
     const float mag = length(move);
     if (mag > 1e-4f) {
@@ -177,10 +211,11 @@ MechInput Game::buildPlayerInput(const InputState& in) const {
         // Full throttle whenever a key is down. Walking at 0.72 meant the
         // machine never reached the speed its legs are rated for, which read
         // as "it barely moves".
-        mi.throttle = 1.0f;
+        const bool anyKey = in.forward || in.back || in.left || in.right;
+        mi.throttle = anyKey ? 1.0f : stickMag;
         // Scoped in: the gunner is on the glass, the driver is easing the
         // machine, not sprinting it. Magnified view plus full speed is soup.
-        if (scopeStage_ > 0) mi.throttle = 0.35f;
+        if (scopeStage_ > 0) mi.throttle = std::min(mi.throttle, 0.35f);
     }
     mi.sprint = in.boost;
     mi.aimPoint = aimPoint_;
@@ -222,7 +257,14 @@ void Game::updateAimAssist() {
     // are what long-range fire is for - then vehicles.
     const Vec3 eye = camPos_;
     const Vec3 ray = normalize(camFocus_ - camPos_);
-    float bestScore = 0.9962f;   // cos ~5 deg: must already be aiming at it
+    // From outside the machine the reticle sits on a ray that starts metres
+    // behind and above the guns, so what looks lined up often is not, and
+    // the target is a smaller thing on a wider screen. The acquisition cone
+    // is nearly twice as wide out there (9 degrees against 5), and the pull
+    // is stronger; in the cabin and on the glass the pilot is expected to
+    // do the work.
+    const bool outside = !fpv_ && scopeStage_ == 0;
+    float bestScore = outside ? 0.9877f : 0.9962f;   // cos 9 deg / cos 5 deg
     Vec3 tPos, tVel;
     bool have = false;
     for (size_t i = 1; i < mission_.mechs().size(); ++i) {
@@ -257,6 +299,18 @@ void Game::updateAimAssist() {
     if (p.stats().trait == Trait::Spotter) s += 0.15f;
     const int rf = static_cast<int>(Ability::Rangefinder);
     if (p.stats().hasPassive[rf]) s += 0.20f * p.stats().passivePower[rf];
+    if (outside) {
+        s += 0.22f;
+        // Shot tracking. The closer the reticle already is to the target,
+        // the harder the fire control finishes the job: inside about a
+        // degree and a half the round goes where the solution says, at four
+        // degrees you are on your own. This is what makes a near miss from
+        // the outside view a hit, without turning the gun into an aimbot
+        // for a reticle that is nowhere near.
+        const float err = std::acos(clampf(bestScore, -1.0f, 1.0f));
+        const float snap = clampf(1.0f - (err - deg2rad(1.5f)) / deg2rad(2.5f), 0.0f, 1.0f);
+        s = s + (0.92f - s) * snap * 0.85f;
+    }
     if (p.locked()) s = 0.95f;
     // A Jammer eats the fire control. Not all of it - the gun still points
     // where you point it - but the solution the sensors were handing you goes
@@ -282,6 +336,9 @@ Vec3 Game::traceAimPoint() const {
 
 void Game::emitAudio(float dt, const MechInput& mi) {
     const Mech& p = mission_.player();
+    // Haptics decay like the shake does; the platform reads them each frame.
+    rumbleHit_ *= std::exp(-9.0f * dt);
+    rumbleGun_ *= std::exp(-14.0f * dt);
 
     // Panning and attenuation are done here rather than in the synthesiser so
     // the platform layer stays a dumb instrument: it is handed gain, pitch and
@@ -324,6 +381,7 @@ void Game::emitAudio(float dt, const MechInput& mi) {
             audio_.push(kind, own ? 0.9f : pl.gain * 0.8f, jitter, own ? 0.0f : pl.pan);
             if (own && w.damage >= 30.0f)
                 shake_ = std::min(1.0f, shake_ + 0.10f + w.damage * 0.003f);
+            if (own) rumbleGun_ = std::min(1.0f, rumbleGun_ + (chain ? 0.10f : 0.04f + w.damage * 0.006f));
 
             // The rocket warning. A hostile warhead in the air is the single
             // most dangerous thing in this game and, until now, it announced
@@ -448,6 +506,7 @@ void Game::emitAudio(float dt, const MechInput& mi) {
         const float bite = clampf((prevHealth_ - p.health()) / 40.0f, 0.25f, 1.0f);
         audio_.push(Sfx::HullHit, bite, 1.0f - 0.25f * bite, 0.0f);
         shake_ = std::min(1.0f, shake_ + bite * 0.35f);
+        rumbleHit_ = std::min(1.0f, rumbleHit_ + bite);
     }
     prevHealth_ = p.health();
 
@@ -747,8 +806,13 @@ void Game::updateCamera(float dt, const InputState& in) {
         // `camPitch_` is how far the camera sits *above* the machine, so
         // pushing the mouse down (positive dy) raises the camera and tips the
         // view downward. Subtracting here is what made aiming feel inverted.
-        camYaw_ += in.mouseDX * in.mouseSensitivity * fovScale;
-        camPitch_ = clampf(camPitch_ + in.mouseDY * in.mouseSensitivity * fovScale,
+        // Reticle friction: while the fire control has a target under the
+        // reticle from the outside view, the view turns a third slower, so
+        // the aim stays on the machine that is jinking under it rather than
+        // skating past. Only outside - in the cabin the sight is yours.
+        const float stick = (!fpv_ && scopeStage_ == 0 && leadValid_) ? 0.68f : 1.0f;
+        camYaw_ += in.mouseDX * in.mouseSensitivity * fovScale * stick;
+        camPitch_ = clampf(camPitch_ + in.mouseDY * in.mouseSensitivity * fovScale * stick,
                            kPitchMin, kPitchMax);
     }
 
@@ -757,7 +821,20 @@ void Game::updateCamera(float dt, const InputState& in) {
     // The camera's up vector chases the mech's. Following it instantly makes
     // the transition onto a wall lurch; following it slowly is what turns the
     // same event into the world rotating around the machine.
-    const Vec3 wantUp = p.up();
+    // On the GROUND the camera's up is the world's, whatever the body is
+    // doing: a walker crossing rough terrain tips its hull with every
+    // slope and rut, and letting the camera frame follow that - even
+    // smoothly - accumulated yaw through the parallel transport below
+    // (transport around a wobbling axis is not a no-op; it is a slow
+    // rotation). Measured: 10 degrees of view swing in a second of strafing
+    // across a hillside with the mouse untouched, which then turned every
+    // strafe into an arc. Only a genuine wall hands the frame to the
+    // surface, where following it is what keeps the machine upright on
+    // screen.
+    const Vec3 worldUp(0.0f, 1.0f, 0.0f);
+    const float onWall = clampf((p.climbFraction() - 0.10f) / 0.20f, 0.0f, 1.0f);
+    Vec3 wantUp = lerp(worldUp, p.up(), onWall);
+    wantUp = (lengthSq(wantUp) > 1e-6f) ? normalize(wantUp) : worldUp;
     camUp_ = normalize(lerp(camUp_, wantUp, clampf(dt * 3.2f, 0.0f, 1.0f)));
 
     // The orbit reference frame is carried across frames and only re-fitted to
@@ -795,6 +872,7 @@ void Game::updateCamera(float dt, const InputState& in) {
     // Direction from the camera toward the focus. Positive pitch looks down.
     const Vec3 offsetDir = normalize(refFwd * (cy * cp) + refRight * (sy * cp) -
                                      camUp_ * sp);
+    camOrbitDir_ = offsetDir;
 
     const Vec3 focus = p.position() + camUp_ * 1.4f;
     // Follow the machine closely. A slow focus lerp reads as the camera
@@ -868,7 +946,27 @@ void Game::renderScene() {
         store_.submitMechPreview(raster_, camPos_);
         store_.submitPartPreview(raster_, kPartPreviewCentre, 1.0f);
     } else {
-        mission_.submit(raster_, camPos_, viewDistance_, scopeStage_ > 0 || fpv_);
+        // From inside the machine, the player's own fire is kept out of the
+        // pilot's face for the first few metres (see Combat::submit).
+        mission_.submit(raster_, camPos_, viewDistance_, scopeStage_ > 0 || fpv_,
+                        (scopeStage_ > 0 || fpv_) ? 9.0f : 0.0f);
+        if (inCabin()) {
+            const Mech& p = mission_.player();
+            bool threat = false;
+            if (const Mech* e = mission_.nearestEnemy())
+                threat = e->alive() && length(e->position() - p.position()) < 220.0f &&
+                         mission_.world().lineOfSight(e->hitCentre(), p.hitCentre());
+            const CabinState st = cabinStateFor(p, elapsed_, threat, mission_.jamStrength() > 0.3f);
+            // Body sway: a walk rocks the cabin a little, more at pace; a
+            // landing dips it. Tiny numbers - it is the difference between a
+            // cabin and a picture frame.
+            const float sf = st.speedFrac;
+            const float w = elapsed_ * (5.0f + 4.5f * sf);
+            Vec3 sway(std::cos(w * 0.5f) * 0.010f * sf,
+                      std::sin(w) * 0.014f * sf - (p.state() == MechState::Landing ? 0.05f : 0.0f),
+                      0.0f);
+            submitCabin(raster_, cam_, cabinLayout_, st, sway);
+        }
     }
     raster_.endFrame();
 }
@@ -896,10 +994,26 @@ void Game::render(AsciiFrame& out) {
 
 void Game::drawPixelRadar(AsciiFrame& out) {
     int rh = 32;                                    // 2:1 cells -> square map
+    // In the cabin the radar is the console's own scope: smaller, and sat
+    // where the scope bezel is drawn on the dashboard.
+    const bool cabin = inCabin();
+    if (cabin) rh = std::min(rh, std::max(8, out.h * 2 / 9));
     while ((out.w < rh * 2 + 4 || out.h < rh + 4) && rh > 12) rh -= 2;
     const int rw = rh * 2;
     if (out.w < rw + 4 || out.h < rh + 4) return;
-    const int rx = out.w - rw - 2, ry = out.h - rh - 2;
+    int rx = out.w - rw - 2, ry = out.h - rh - 2;
+    if (cabin) {
+        CabinLayout lay = cabinLayout_;
+        lay.resolve(cam_);
+        const Vec3 world = cam_.pos + cam_.right * lay.scope.x + cam_.up * lay.scope.y +
+                           cam_.forward * lay.scope.z;
+        const Vec4 clip = transform(cam_.viewProj, Vec4(world, 1.0f));
+        if (clip.w > 0.02f) {
+            const int cxp = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(out.w));
+            rx = std::max(1, std::min(out.w - rw - 1, cxp - rw / 2));
+        }
+        ry = out.h - rh - 1;
+    }
     const float range = 150.0f;                     // metres to the edge
     const Mech& p = mission_.player();
     const Vec3 fwd = normalize(flattenY(camFocus_ - camPos_) + Vec3(0.0f, 0.0f, 1e-4f));
@@ -1039,6 +1153,12 @@ void Game::drawHudOnly(AsciiFrame& out) {
     // buffers allocated across frames.
     for (Cell& c : out.cells) c = Cell{};
     if (hudVisible_) drawHud(out);
+    if (paused_ && out.w >= 40 && out.h >= 10) {
+        const int cx = out.w / 2, cy = out.h / 2;
+        fillPanel(out, cx - 19, cy - 2, 38, 5, Vec3(0.008f, 0.018f, 0.013f));
+        drawText(out, cx - 3, cy - 1, "PAUSED", kBright);
+        drawText(out, cx - 16, cy + 1, "ESC RESUME   Q QUIT TO DESKTOP", kDim);
+    }
 }
 
 void Game::hudGridFor(int availCols, int availRows, int* colsOut, int* rowsOut) {
@@ -1298,8 +1418,6 @@ void Game::drawCombatHud(AsciiFrame& frame) {
         if (rh.hit)
             drawText(frame, cx + 3, cy - 2,
                      fmtInt(static_cast<int>(rh.distance)) + "m", kNorm);
-    } else if (fpv_) {
-        drawText(frame, cx - 4, 1, "DRIVER CAM", kDim);
     }
 
     // Water: the one warning that ends runs.
@@ -1307,6 +1425,14 @@ void Game::drawCombatHud(AsciiFrame& frame) {
         const bool deep = p.wading() > 0.8f;
         drawText(frame, cx - 6, cy + 4, deep ? "!! FLOODING !!" : "WADING",
                  deep ? kBad : kWarn);
+    }
+
+    // In the cabin the readouts are the console's own instruments (drawn as
+    // geometry in renderScene); the text pass only labels them. No side
+    // panels: the glass is for looking through.
+    if (inCabin()) {
+        drawCabinReadouts(frame);
+        return;
     }
 
     // ---- left column: machine status -------------------------------------
@@ -1550,6 +1676,170 @@ void Game::drawCombatHud(AsciiFrame& frame) {
                   kDim);
 }
 
+// ------------------------------------------------------------------- cabin
+
+void Game::drawCabinReadouts(AsciiFrame& frame) {
+    const int W = frame.w, H = frame.h;
+    const Mech& p = mission_.player();
+    CabinLayout lay = cabinLayout_;
+    lay.resolve(cam_);
+
+    // A camera-space point (the cabin's own frame) to a HUD cell. The HUD
+    // grid and the scene grid both span the window, so clip space maps to
+    // either.
+    auto anchor = [&](const Vec3& local, int* px, int* py) {
+        const Vec3 world = cam_.pos + cam_.right * local.x + cam_.up * local.y +
+                           cam_.forward * local.z;
+        const Vec4 clip = transform(cam_.viewProj, Vec4(world, 1.0f));
+        if (clip.w < 0.02f) return false;
+        *px = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(W));
+        *py = static_cast<int>((0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(H));
+        return true;
+    };
+    int px, py;
+
+    // ---- hull / heat: numbers at the end of the lit bars -----------------
+    const float hpFrac = p.healthFraction();
+    const TextStyle& hpStyle = hpFrac < 0.25f ? kBad : (hpFrac < 0.55f ? kWarn : kGood);
+    if (anchor(lay.hullBar + Vec3(lay.barLen + 0.03f, 0.0f, 0.0f), &px, &py))
+        drawText(frame, px, py, "HULL " + fmtInt(static_cast<int>(p.health())), hpStyle);
+    if (anchor(lay.hullBar + Vec3(-0.06f, 0.0f, 0.0f), &px, &py))
+        drawText(frame, px - 2, py, "H", kDim);
+    const float heatFrac = clampf(p.heat() / std::max(p.stats().heatCapacity, 0.01f), 0.0f, 1.0f);
+    if (anchor(lay.heatBar + Vec3(lay.barLen + 0.03f, 0.0f, 0.0f), &px, &py))
+        drawText(frame, px, py, p.overheated() ? "OVERHEAT" : "HEAT",
+                 p.overheated() ? kBad : (heatFrac > 0.7f ? kWarn : kDim));
+    // Ability keys under their lamps.
+    {
+        static const char* keys[4] = {"Q", "E", "R", "F"};
+        int k = 0;
+        for (int slot = 0; slot < 4; ++slot) {
+            if (p.slotAbility(slot) == Ability::None) continue;
+            const Vec3 at = lay.abilityLamps + Vec3(lay.lampPitch * static_cast<float>(k++), 0.0f, 0.0f);
+            if (!anchor(at, &px, &py)) continue;
+            const bool ready = p.abilityReady(slot);
+            const bool on = p.abilityEngaged(slot);
+            drawText(frame, px, py + 1, keys[slot], on ? kWarn : (ready ? kBright : kDim));
+        }
+        // The name of whichever is engaged, or the next one ready, beside them.
+        if (anchor(lay.abilityLamps + Vec3(lay.lampPitch * 4.2f, 0.0f, 0.0f), &px, &py)) {
+            for (int slot = 0; slot < 4; ++slot) {
+                if (p.slotAbility(slot) == Ability::None) continue;
+                if (p.abilityEngaged(slot)) {
+                    drawText(frame, px, py, abilityName(p.slotAbility(slot)), kWarn);
+                    break;
+                }
+            }
+        }
+    }
+    // Climb / jump state beside its bar.
+    if (anchor(lay.jumpBar + Vec3(lay.barLen + 0.03f, 0.0f, 0.0f), &px, &py)) {
+        if (p.climbFraction() > 0.05f) drawText(frame, px, py, "CLIMB", kBright);
+        else if (p.jumpCharge() > 0.01f) drawText(frame, px, py, "JUMP", kWarn);
+    }
+
+    // ---- guns: a number under each lamp, the list on the console face ----
+    const std::vector<MountedWeapon>& ws = p.weapons();
+    int listX = 2, listY = H - 2;
+    if (anchor(lay.gunLamps, &px, &py)) { listX = px; listY = py + 1; }
+    for (size_t i = 0; i < ws.size() && i < 6; ++i) {
+        const Vec3 at = lay.gunLamps + Vec3(lay.lampPitch * static_cast<float>(i), 0.0f, 0.0f);
+        if (!anchor(at, &px, &py)) continue;
+        const MountedWeapon& w = ws[i];
+        const bool ready = w.part && w.enabled && w.cooldown <= 0.01f &&
+                           (w.part->weapon.ammo != AmmoKind::Limited || w.rounds > 0);
+        std::string t(1, static_cast<char>('1' + static_cast<int>(i)));
+        drawText(frame, px, py + 1, t, !w.enabled ? kDim : (ready ? kBright : kDim));
+    }
+    // The list: tag, name, ammo - one row per mount below the lamps, as far
+    // as the console face has rows.
+    {
+        int y = listY + 1;
+        for (size_t i = 0; i < ws.size() && y < H; ++i, ++y) {
+            const MountedWeapon& w = ws[i];
+            if (!w.part) { drawText(frame, listX, y, "-- empty", kDim); continue; }
+            const WeaponDef& def = w.part->weapon;
+            std::string ammo;
+            switch (def.ammo) {
+                case AmmoKind::Unlimited: ammo = ""; break;
+                case AmmoKind::Cooldown:  ammo = w.cooldown > 0.01f ? fmt(w.cooldown, 1) + "s" : "RDY"; break;
+                case AmmoKind::Limited:   ammo = fmtInt(w.rounds) + "+" + fmtInt(w.reserve); break;
+            }
+            std::string name = w.part->name;
+            if (name.size() > 14) name = name.substr(0, 14);
+            std::string line = std::string(w.group == 0 ? "L " : "R ") + name;
+            if (!ammo.empty()) line += " " + ammo;
+            const bool dry = def.ammo == AmmoKind::Limited && w.rounds == 0 && w.reserve == 0;
+            drawText(frame, listX, y, line, !w.enabled ? kDim : (dry ? kBad : kNorm));
+        }
+    }
+
+    // ---- objective, on the right of the console --------------------------
+    if (anchor(lay.objectiveText, &px, &py)) {
+        int y = py;
+        const int x = std::min(px, W - 30);
+        if (const ObjectiveSpec* obj = mission_.currentObjective()) {
+            drawText(frame, x, y++, obj->label, kBright);
+            std::string sub;
+            if (mission_.objectiveTarget() > 0)
+                sub = fmtInt(mission_.objectiveProgress()) + "/" + fmtInt(mission_.objectiveTarget()) + " ";
+            if (obj->timer > 0.0f)
+                sub += "T-" + fmt(std::max(0.0f, mission_.objectiveTimer()), 0) + " ";
+            const bool zoneKind = obj->kind != ObjectiveKind::Convoy &&
+                                  obj->kind != ObjectiveKind::Rampage &&
+                                  obj->kind != ObjectiveKind::DestroyMarked &&
+                                  obj->kind != ObjectiveKind::KillTarget &&
+                                  obj->kind != ObjectiveKind::Blackout;
+            if (zoneKind) {
+                const Vec3 to = mission_.objectiveZone() - p.position();
+                const Vec3 flatF = normalize(flattenY(camOrbitDir_) + Vec3(0.0f, 0.0f, 1e-4f));
+                const Vec3 flatT = normalize(flattenY(to) + Vec3(0.0f, 0.0f, 1e-4f));
+                const float ang = std::atan2(cross(flatF, flatT).y, dot(flatF, flatT));
+                int clock = static_cast<int>(std::round(ang / (PI / 6.0f)));
+                clock = ((clock % 12) + 12) % 12;
+                if (clock == 0) clock = 12;
+                sub += "MARK " + fmtInt(clock) + " O'C " + fmtInt(static_cast<int>(length(flattenY(to)))) + "m";
+            }
+            if (!sub.empty() && y < H) drawText(frame, x, y++, sub, kNorm);
+            if (mission_.jamStrength() > 0.02f && y < H)
+                drawText(frame, x, y++, mission_.jamStrength() > 0.55f ? "! JAMMED" : "! SIGNAL DEGRADED", kBad);
+            if (mission_.alarmLevel() > 0.05f && y < H)
+                drawText(frame, x, y++, mission_.alarmLevel() > 0.6f ? "ALARM HIGH" : "ALARM RISING",
+                         mission_.alarmLevel() > 0.6f ? kBad : kWarn);
+        }
+    }
+
+    // ---- contact lamp label and the count ---------------------------------
+    {
+        int hostiles = mission_.enemiesAlive();
+        for (const Unit& u : mission_.units())
+            if (u.alive() && u.team() == Team::Hostile) ++hostiles;
+        if (anchor(lay.threatLamp + Vec3(0.05f, 0.0f, 0.0f), &px, &py)) {
+            const Mech* e = mission_.nearestEnemy();
+            std::string t = fmtInt(hostiles) + " HOSTILE";
+            if (e) {
+                const Vec3 to = e->position() - p.position();
+                const Vec3 flatF = normalize(flattenY(camOrbitDir_) + Vec3(0.0f, 0.0f, 1e-4f));
+                const Vec3 flatT = normalize(flattenY(to) + Vec3(0.0f, 0.0f, 1e-4f));
+                const float ang = std::atan2(cross(flatF, flatT).y, dot(flatF, flatT));
+                int clock = static_cast<int>(std::round(ang / (PI / 6.0f)));
+                clock = ((clock % 12) + 12) % 12;
+                if (clock == 0) clock = 12;
+                t += "  MECH " + fmtInt(clock) + " O'C " + fmtInt(static_cast<int>(length(to))) + "m";
+                if (e->onWall()) t += " UP";
+            }
+            drawText(frame, px, py, t, hostiles > 0 ? kWarn : kGood);
+        }
+    }
+
+    // ---- the few things that belong on the glass --------------------------
+    drawTextRight(frame, W - 2, 0, money(profile_.cash + mission_.cashEarned()) + " cr", kDim);
+    drawText(frame, 2, 0, level_.name, kDim);
+    drawText(frame, 2, H - 1, "[X] EXTERNAL VIEW  [Z] SIGHT", kDim);
+    drawTextRight(frame, W - 2, H - 1, fmt(p.speed(), 1) + " m/s  " +
+                  fmt(frameMs_ > 0.0f ? 1000.0f / frameMs_ : 0.0f, 0) + " FPS", kDim);
+}
+
 // ---------------------------------------------------------------- briefing
 
 void Game::drawBriefing(AsciiFrame& frame) {
@@ -1623,7 +1913,7 @@ void Game::drawBriefing(AsciiFrame& frame) {
     if (profile_.maxCleared >= 0)
         drawTextRight(frame, x + boxW - 3, y + boxH - 2, "< > REPLAY CONTRACTS", kDim);
     // The views nobody finds by accident, and the fresh start.
-    drawText(frame, x + 3, y + boxH - 1, "[Z] GUNSIGHT  [X] DRIVER CAM  IN THE FIELD",
+    drawText(frame, x + 3, y + boxH - 1, "[Z] GUNSIGHT  [X] STEP OUTSIDE THE CABIN  [ESC] PAUSE",
              kDim);
     drawTextRight(frame, x + boxW - 3, y + boxH - 1,
                   wipeArmed_ > 0.0f ? "[N] AGAIN TO WIPE SAVE!" : "[N] NEW PROFILE",

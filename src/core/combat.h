@@ -46,6 +46,7 @@ struct Effect {
     float maxLife = 0.4f;
     float gravity = 0.0f;
     bool spark = false;              // sparks streak; blooms are round
+    int shooter = -1;                // whose gun made it (0 = player), or -1
 };
 
 // A magazine left on the field by a destroyed machine, or scattered by the
@@ -127,7 +128,12 @@ public:
     // being one slow unrecoverable bleed.
     void addRepair(const Vec3& pos, float structure);
 
-    void submit(Rasterizer& raster, const Vec3& viewPos) const;
+    // `eyeRadius` > 0 means the view is FROM INSIDE the player's machine:
+    // the player's own rounds and muzzle blooms are drawn small and dim
+    // inside that radius of the eye and not at all right at it, so a rotary
+    // gun's stream does not wallpaper the windscreen. Everything else -
+    // hostile fire, impacts, rounds already downrange - draws as normal.
+    void submit(Rasterizer& raster, const Vec3& viewPos, float eyeRadius = 0.0f) const;
 
     // Spawns a bloom plus a spray of sparks. Public because the mech's own
     // destruction sequence uses it.

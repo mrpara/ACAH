@@ -157,9 +157,86 @@ std::vector<Destructible> furnishArena(World& world, uint32_t seed, int budget,
 }
 
 void submitDestructible(Rasterizer& raster, const Destructible& d, const Vec3& viewPos) {
-    if (!d.alive) return;
     if (lengthSq(d.pos - viewPos) > 240.0f * 240.0f) return;
     const PropMeshes& pm = PropMeshes::instance();
+
+    // Dead: the collapse plays over the first second, then the remnant sits
+    // there scorched. Nothing blinks out of existence any more - a field you
+    // have fought across looks fought across.
+    if (!d.alive) {
+        const float t = smoothstep01(clampf(d.deadAge / 0.9f, 0.0f, 1.0f));
+        const Vec3 scorch = lerp(Vec3(0.55f, 0.45f, 0.38f), Vec3(0.17f, 0.16f, 0.15f),
+                                 clampf(d.deadAge / 1.4f, 0.0f, 1.0f));
+        auto drawD = [&](const Mesh& m, const Mat4& model) {
+            DrawItem it;
+            it.mesh = &m;
+            it.model = model;
+            it.tint = scorch;
+            it.twoSided = true;
+            raster.submit(it);
+        };
+        // Topple about a ground pivot on the far side from the fall direction.
+        const Mat4 base = Mat4::translation(d.pos) * Mat4::rotationY(d.yaw);
+        const float fallDir = d.fallYaw - d.yaw;
+        auto topple = [&](float pivotR, float angle) {
+            return base * Mat4::rotationY(fallDir) * Mat4::translation(Vec3(0.0f, 0.0f, pivotR)) *
+                   Mat4::rotationX(angle) * Mat4::translation(Vec3(0.0f, 0.0f, -pivotR)) *
+                   Mat4::rotationY(-fallDir);
+        };
+        switch (d.style) {
+            case PropStyle::FuelTank:
+                // The shell splits: two halves slump apart and the cradle stays.
+                drawD(pm.fuelTank, base * Mat4::translation(Vec3(-0.5f * t, 1.75f - 0.9f * t, -2.3f)) *
+                                       Mat4::rotationZ(-0.55f * t) * Mat4::rotationX(PI * 0.5f) *
+                                       Mat4::scaling(Vec3(1.0f, 0.55f, 1.0f)));
+                drawD(pm.fuelTank, base * Mat4::translation(Vec3(0.6f * t, 1.75f - 1.1f * t, -2.3f)) *
+                                       Mat4::rotationZ(0.75f * t) * Mat4::rotationX(PI * 0.5f) *
+                                       Mat4::scaling(Vec3(1.0f, 0.55f, 0.85f)));
+                for (int s2 = -1; s2 <= 1; s2 += 2)
+                    drawD(pm.tankLeg, base * Mat4::translation(Vec3(0.0f, 0.55f, s2 * 1.5f)));
+                break;
+            case PropStyle::BarrelCluster:
+                // Drums blown over and outward.
+                drawD(pm.barrel, base * Mat4::translation(Vec3(-0.5f - 0.6f * t, 0.0f, 0.2f)) *
+                                     Mat4::rotationZ(1.4f * t));
+                drawD(pm.barrel, base * Mat4::translation(Vec3(0.45f + 0.7f * t, 0.0f, -0.3f)) *
+                                     Mat4::rotationZ(-1.3f * t) * Mat4::rotationY(0.5f));
+                if (t < 0.95f)
+                    drawD(pm.barrel, base * Mat4::translation(Vec3(0.25f, 1.6f * t * (1.0f - t), 0.5f + 0.9f * t)) *
+                                         Mat4::rotationX(-1.5f * t));
+                break;
+            case PropStyle::CrateStack:
+                // The top crate slides off; the others crush.
+                drawD(pm.crate, base * Mat4::translation(Vec3(-0.4f, 0.55f - 0.25f * t, 0.0f)) *
+                                    Mat4::scaling(Vec3(1.0f, 1.0f - 0.45f * t, 1.0f)));
+                drawD(pm.crate, base * Mat4::translation(Vec3(1.0f, 0.55f - 0.2f * t, 0.3f)) *
+                                    Mat4::rotationY(0.4f) * Mat4::rotationZ(0.3f * t) *
+                                    Mat4::scaling(Vec3(1.0f, 1.0f - 0.35f * t, 1.0f)));
+                drawD(pm.crate, base * Mat4::translation(Vec3(0.2f - 1.4f * t, 1.65f - 1.1f * t, 0.1f + 0.4f * t)) *
+                                    Mat4::rotationY(0.2f) * Mat4::rotationZ(1.1f * t));
+                break;
+            case PropStyle::AntennaMast:
+                // Folds at the joint and comes down whole.
+                drawD(pm.mastSection, topple(1.0f, 1.45f * t));
+                drawD(pm.mastSection, topple(1.0f, 1.45f * t) * Mat4::translation(Vec3(0.0f, 4.6f, 0.0f)) *
+                                          Mat4::rotationX(0.6f * t) *
+                                          Mat4::scaling(Vec3(0.75f, 0.75f, 0.75f)));
+                break;
+            case PropStyle::GuardShed:
+                // The roof drops onto flattened walls.
+                drawD(pm.shedBody, base * Mat4::translation(Vec3(0.0f, 1.3f - 0.75f * t, 0.0f)) *
+                                       Mat4::scaling(Vec3(1.0f + 0.15f * t, 1.0f - 0.6f * t, 1.0f + 0.15f * t)));
+                drawD(pm.shedRoof, base * Mat4::translation(Vec3(0.3f * t, 2.65f - 1.5f * t, 0.0f)) *
+                                       Mat4::rotationZ(0.35f * t));
+                break;
+            case PropStyle::CoolingStack:
+                // The chimney comes down in the direction it was hit from.
+                drawD(pm.stack, topple(2.2f, 1.5f * t));
+                break;
+            default: break;
+        }
+        return;
+    }
 
     const Vec3 flash = lerp(Vec3(1.0f, 1.0f, 1.0f), Vec3(1.0f, 0.5f, 0.35f),
                             clampf(d.damageFlash, 0.0f, 1.0f));

@@ -66,6 +66,7 @@ struct Leg {
     Vec3 stepToNormal{0.0f, 1.0f, 0.0f};
     float stepT = 1.0f;
     bool stepping = false;
+    float stepClear = 0.0f;             // arc height this step needs to clear an obstacle
 
     // Solved chain, world space.
     Vec3 hipWorld{0.0f, 0.0f, 0.0f};
@@ -391,6 +392,12 @@ private:
     Vec3 confineRef_ = Vec3(0.0f);
     float escapeScan_ = 0.0f;      // countdown to the next bearing sweep
     float escapeOpen_ = 0.0f;      // how far the most open bearing runs
+    bool enclosed_ = false;        // scan verdict: boxed in, not just idle
+    bool pinched_ = false;         // scan verdict: half the compass blocked close
+    float stepOver_ = 0.0f;        // 0..1: how hard the hull is being lifted over a lump
+    float footPitch_ = 0.0f;       // hull pitch that follows the feet (cosmetic)
+    float stepRaise_ = 0.0f;       // metres of extra ride height asked for by a step-over
+    float stepRaiseNow_ = 0.0f;    // smoothed copy the physics uses
     Vec3 escapeDir_ = Vec3(1.0f, 0.0f, 0.0f);
     // Ground height where the current climb began: the floor under every
     // "is this a roof" test, so the pavement at the base of a wall can never

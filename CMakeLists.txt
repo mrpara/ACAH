@@ -38,6 +38,7 @@ add_library(spiderbot_core STATIC
     src/core/ai.cpp
     src/core/campaign.cpp
     src/core/store.cpp
+    src/core/cabin.cpp
     src/core/game.cpp
 )
 target_include_directories(spiderbot_core PUBLIC src)

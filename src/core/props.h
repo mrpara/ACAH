@@ -44,6 +44,11 @@ struct Destructible {
     float hitRadius = 1.4f;
     float hitHeight = 1.6f;     // hit sphere centre sits at half this
     float damageFlash = 0.0f;
+    // Seconds since it died. Drives the collapse (a stack topples, a tank
+    // splits and slumps, a mast folds, a chimney comes down in the direction
+    // of the hit) and the scorched remnant that stays on the field after.
+    float deadAge = 0.0f;
+    float fallYaw = 0.0f;       // which way it went over
 
     Vec3 hitCentre() const { return pos + Vec3(0.0f, hitHeight * 0.5f, 0.0f); }
 

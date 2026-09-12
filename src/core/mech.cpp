@@ -350,22 +350,48 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
                 // near it, which cancelled the whole top-out.)
                 const float obBase = world.terrain().height(o.center.x, o.center.z);
                 const float obHeight = obTop - obBase;
-                const bool lowStep = o.climbable && !climbing_ &&
+                // Climbable or not: a rock is not a wall either, it is a
+                // lump to walk over. (Rocks and trees are flagged
+                // unclimbable so nobody scales a boulder; that must not
+                // turn every boulder into a fence.)
+                const bool lowStep = !climbing_ &&
                                      obHeight < stats_.standHeight * 1.15f &&
                                      obTop < pos_ .y - rideHeight_ +
                                                  stats_.standHeight * 1.05f;
                 if (lowStep) {
                     // Lift over it: a gentle boost while pushing into the
                     // face, which the gait then plants feet on top of.
-                    const float need = obTop - (pos_.y - rideHeight_);
+                    // How far the feet-level has to come up to stand on it.
+                    // Measured against the SETTLED body, not the raised one,
+                    // or the raise would feed itself.
+                    const float feetLevel = pos_.y - rideHeight_ - stepRaiseNow_;
+                    const float need = obTop - feetLevel;
                     if (need > 0.15f && dot(vel_, dir) > -0.5f) {
-                        const Vec3 worldUp(0.0f, 1.0f, 0.0f);
-                        if (dot(vel_, worldUp) < 3.2f)
-                            vel_ += worldUp * (7.5f * dt * clampf(need, 0.0f, 2.0f));
-                        vel_ += dir * (2.5f * dt);
+                        // The old lift was a velocity nudge racing the
+                        // ride-height spring, which pulled the hull straight
+                        // back down toward the ground the rear feet were
+                        // still on: the machine bumped, stalled and oozed
+                        // over anything knee-high. Now the step is a RAISE
+                        // of the ride target - the body is carried up to the
+                        // lump's top and walks onto it while the hull sphere
+                        // (see the stepTop rule in locomotion) stops seeing
+                        // it as a wall. Drive stays on so the feet reach it.
+                        stepRaise_ = std::max(stepRaise_,
+                                              std::min(need + 0.25f, stats_.standHeight * 1.25f));
+                        vel_ += dir * (3.0f * dt);
+                        stepOver_ = std::max(stepOver_, clampf(need / std::max(stats_.standHeight, 0.5f), 0.0f, 1.0f));
                     }
                 }
-                if (!lowStep && o.climbable && tilt > deg2rad(50.0f) &&
+                // A NEW climb has to be meant. Brushing past a building at a
+                // shallow angle used to catch the wall, shed two thirds of
+                // the machine's speed and swing the body onto the face - to
+                // the pilot that was the machine "resisting" and then walking
+                // off up a wall nobody asked it to climb. Only a drive aimed
+                // well into the face (inside ~60 degrees) commits; a glancing
+                // one slides along the wall like any other collision. A climb
+                // already in hand keeps its longer, looser probe.
+                const bool meant = climbing_ || dot(dir, probe.normal) < -0.35f;
+                if (!lowStep && meant && o.climbable && tilt > deg2rad(50.0f) &&
                     gripAllowed(probe.normal)) {
                     // Catching a wall costs momentum. Arriving at ten metres a
                     // second and expecting six limbs to find purchase on a
@@ -374,7 +400,7 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
                     // off again. Shedding most of the speed on contact is both
                     // what would really happen and what lets the gait catch up.
                     if (!climbing_) {
-                        const Vec3 intoFace = climbNormal_ * dot(vel_, probe.normal);
+                        const Vec3 intoFace = probe.normal * dot(vel_, probe.normal);
                         vel_ = (vel_ - intoFace) * 0.35f;
                         // Where this climb began. Everything below the start is
                         // the ground the machine walked in on, not roof.
@@ -938,7 +964,18 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
 
     Vec3 contactNormal(0.0f, 1.0f, 0.0f);
     ObstacleKind contactKind = ObstacleKind::Terrain;
-    Vec3 corrected = world.resolveCollision(desired, hitRadius_, &contactNormal, &contactKind);
+    // Anything whose top is below roughly half the stance is a step, not a
+    // wall: rocks, rubble, crate stacks, kerbs, the slab of a ruined floor.
+    // The feet find footholds on top of it and the ride-height spring lifts
+    // the hull; the hull sphere never sees it. On a wall or in the air the
+    // hull has no stance to step with, so everything is solid again.
+    // (While the body is being raised over something taller, the raise
+    // lifts this line with it, so the lump drops below it as the hull
+    // clears - the walk-over and the collision skip arrive together.)
+    const float stepTop = (state_ != MechState::Airborne && !climbing_)
+        ? (pos_.y - rideHeight_ + stats_.standHeight * 0.55f) : -1e9f;
+    Vec3 corrected = world.resolveCollision(desired, hitRadius_, &contactNormal,
+                                            &contactKind, stepTop);
 
     // Cap how far collision may move the mech in one frame. Resolving a deep
     // overlap instantly reads as a teleport and drags planted feet past reach.
@@ -949,8 +986,27 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
         if (pushLen > maxPush) corrected = desired + push * (maxPush / pushLen);
         if (pushLen > 1e-5f) {
             const Vec3 n = normalize(push);
-            const float into = dot(vel_, n);
-            if (into < 0.0f) vel_ -= n * into;
+            // The ground the machine is STANDING on is not a wall it walked
+            // into. On a slope the terrain shoves the hull along its normal
+            // every frame, and cancelling the velocity "into" that normal
+            // cancelled a slice of gravity along a tilted axis - which has a
+            // sideways part. On a hillside that was a steady 0.3-0.5 m/s of
+            // travel the pilot never asked for (measured: seven metres of
+            // creep across fourteen seconds of strafing). The ride-height
+            // spring below already handles the support surface, so a push
+            // from the surface being held only touches the component along
+            // the body's own up; everything else - walls, props, the far
+            // side of a ditch - keeps the full response.
+            const bool fromSupport = contactKind == ObstacleKind::Terrain &&
+                                     state_ != MechState::Airborne &&
+                                     dot(n, up_) > 0.80f;
+            if (fromSupport) {
+                const float vn = dot(vel_, up_);
+                if (vn < 0.0f) vel_ -= up_ * vn;
+            } else {
+                const float into = dot(vel_, n);
+                if (into < 0.0f) vel_ -= n * into;
+            }
         }
     }
     pos_ = corrected;
@@ -1063,7 +1119,7 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
             // Ride at the right height above the support surface, and cancel
             // any velocity into or out of it.
             const float along = dot(pos_ - supportPoint_, up_);
-            const float corr = rideHeight_ - along;
+            const float corr = rideHeight_ + stepRaiseNow_ - along;
             pos_ += up_ * (corr * (1.0f - std::exp(-13.0f * dt)));
             const float vn = dot(vel_, up_);
             vel_ -= up_ * vn;
@@ -1135,7 +1191,12 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
     // against them forever without ever getting out. If a machine has been
     // trying to move and has not moved, walk it out along the contact normal at
     // a rate the cap cannot swallow.
-    const float wanted = length(flattenY(vel_)) * dt;
+    // "Wanted" is what the pilot asked for, not what the velocity happens to
+    // be after a wall has eaten it: the old form read the post-collision
+    // velocity, which at 60 Hz was too small to count as trying and at 30 Hz
+    // was not - so whether shoving at a wall got the machine shouldered
+    // sideways depended on the frame rate. Rated speed is frame-rate blind.
+    const float wanted = stats_.maxSpeed * clampf(in.throttle, 0.0f, 1.0f) * dt;
     const float actual = length(pos_ - lastPos_);
     // Buried: the hull centre is actually inside something solid. That happens
     // when a machine drops through a gap in a roof, is shoved into a wall by an
@@ -1143,7 +1204,9 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
     // it. It counts as stuck even if the pilot has let go of the stick, because
     // there is nothing the pilot can press that would help.
     const bool buried = world.insideSolid(pos_, hitRadius_ * 0.35f);
-    const bool trying = in.throttle > 0.15f && wanted > 0.01f;
+    const bool trying = in.throttle > 0.15f && lengthSq(in.moveWorld) > 0.01f &&
+                        !bracing && state_ != MechState::Crouching &&
+                        state_ != MechState::Airborne;
     if (buried || (trying && actual < wanted * 0.12f)) {
         wedged_ += dt;
     } else {
@@ -1171,9 +1234,21 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
         confineRef_ = pos_;
         confineTimer_ = std::max(0.0f, confineTimer_ - dt * 2.0f);
     }
-    const bool confined = confineTimer_ > 6.0f;
+    // "Has not got anywhere in a while" is only EVIDENCE of confinement, not
+    // proof: a pilot dodging in place through a firefight has not got anywhere
+    // either, and treating that as trapped shouldered the machine off along
+    // whatever bearing the scan liked - the reported "it keeps moving to one
+    // side without me pressing anything". The proof is geometric and comes
+    // from the bearing scan below: a machine is confined only when the way it
+    // is being asked to go is blocked AND most bearings around it are short.
+    // Until the scan has said so, the timer alone does nothing.
+    // And a pilot who has let go of the stick is never shoved anywhere: the
+    // whole point of the escape is to get the machine where it is being
+    // ASKED to go.
+    const bool confineSuspect = confineTimer_ > 6.0f && in.throttle > 0.15f;
+    const bool confined = confineSuspect && enclosed_;
 
-    if (wedged_ > 0.45f || confined) {
+    if (wedged_ > 0.45f || confineSuspect) {
         // Find the way out rather than guessing at one. The old rule pushed
         // along the deepest contact normal, which is exactly the direction that
         // cancels when a machine is pinched between two walls - it would sit
@@ -1195,6 +1270,9 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
             // an override: an open bearing always beats a blocked one.
             const Vec3 want = flattenY(in.moveWorld);
             const Vec3 wantDir = (lengthSq(want) > 1e-4f) ? normalize(want) : Vec3(0.0f);
+            int openBearings = 0;      // bearings that run a good way
+            int nearOpen = 0;          // bearings clear for a few metres
+            float wantClear = 0.0f;    // how far the pilot's own bearing runs
             for (int i = 0; i < kBearings; ++i) {
                 const float a = (static_cast<float>(i) / static_cast<float>(kBearings)) * TAU;
                 const Vec3 dir(std::cos(a), 0.0f, std::sin(a));
@@ -1204,16 +1282,39 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
                     clear = d;
                 }
                 escapeOpen_ = std::max(escapeOpen_, clear);
-                const float score = clear + 1.5f * std::max(0.0f, dot(dir, wantDir));
+                if (clear >= 12.0f) ++openBearings;
+                if (clear >= 3.2f) ++nearOpen;
+                const float toward = dot(dir, wantDir);
+                if (toward > 0.80f) wantClear = std::max(wantClear, clear);
+                const float score = clear + 1.5f * std::max(0.0f, toward);
                 if (score > best) { best = score; escapeDir_ = dir; }
             }
+            // Enclosed means: the pilot cannot go where the stick points,
+            // and there are at most a couple of long bearings (the doorway
+            // of a yard, the mouth of an alley). An open field reads sixteen
+            // long bearings; a street reads four to six. Neither is a trap,
+            // however long the machine has danced in it.
+            enclosed_ = lengthSq(wantDir) > 0.5f && wantClear < 11.0f &&
+                        openBearings <= 5;
+            // Pinched means: more than half the compass is blocked within a
+            // few metres. A machine shoving at one flat wall in the open
+            // has eleven of sixteen bearings clear - it is not stuck, it is
+            // pointed at a wall, and the pilot can steer; shouldering it
+            // sideways there was the OTHER half of "it moves on its own".
+            // A hull between two boxes, or buried, reads pinched and is
+            // walked out as before.
+            // A hostile machine keeps the old, permissive rule: nobody minds
+            // an AI shouldering itself round a tree, and its own brain has
+            // no hands to steer with.
+            pinched_ = buried || nearOpen <= 8 || team_ != Team::Player;
         }
 
         // A bearing that runs most of the way to the scan limit leads OUT.
         // One that runs a few metres and stops is just the far wall of the
         // same box - taking it walks the machine across its prison.
-        const bool wayOut = escapeOpen_ > 18.0f;
-        if (wayOut || (wedged_ > 0.45f && escapeOpen_ > 1.5f)) {
+        const bool stuckFast = wedged_ > 0.45f && pinched_;
+        const bool wayOut = escapeOpen_ > 18.0f && (confined || stuckFast);
+        if (wayOut || (stuckFast && escapeOpen_ > 1.5f)) {
             // Shoulder it free, fast enough that the 0.35 m per-frame
             // collision cap cannot swallow the whole correction, slow enough
             // to read as the machine forcing its way out rather than a
@@ -1221,7 +1322,7 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
             pos_ += escapeDir_ * (3.6f * dt);
             vel_ = flattenY(vel_) * 0.4f + escapeDir_ * 1.2f;
             vel_.y = std::max(vel_.y, 0.0f);
-        } else if (wedged_ > 1.2f || confined) {
+        } else if ((wedged_ > 1.2f && pinched_) || confined) {
             // Boxed in on every bearing: the only way out is up, and this is a
             // machine that walks up buildings, so clambering out of a light
             // well is in character. It is also the backstop that means no
@@ -1494,7 +1595,15 @@ void Mech::updateGait(float dt, const World& world) {
                 // The arc lifts along the surface normal, not world up, so a
                 // foot on a wall swings out from the wall.
                 const Vec3 lift = normalize(lerp(leg.footNormal, leg.stepToNormal, s));
-                p += lift * (std::sin(leg.stepT * PI) * stepHeight);
+                // A step onto something HIGHER, or over something in the
+                // way, arcs higher: the foot clears the obstacle by a
+                // margin instead of dragging its toe through the rock. The
+                // clearance was measured once at lift-off (leg.stepClear).
+                const float arc = std::max(stepHeight, leg.stepClear);
+                p += lift * (std::sin(leg.stepT * PI) * arc);
+                // Late in a high step the foot comes DOWN onto the top
+                // rather than sweeping through the front of it: ease the
+                // horizontal travel ahead of the descent.
                 leg.foot = p;
                 leg.planted = false;
             }
@@ -1554,6 +1663,22 @@ void Mech::updateGait(float dt, const World& world) {
         leg.stepping = true;
         leg.planted = false;
         ++swinging;
+
+        // How high this step has to arc. Two things raise it: landing higher
+        // than it left (stepping UP onto a rock or a kerb), and something
+        // solid poking up between the two footfalls (stepping OVER one). One
+        // probe at the midpoint finds the second; the first is arithmetic.
+        // Measured against the body's up so a wall step is unaffected.
+        leg.stepClear = 0.0f;
+        if (!climbing_) {
+            const float rise = dot(leg.stepTo - leg.stepFrom, up_);
+            float highest = std::max(0.0f, rise);
+            const Vec3 mid = lerp(leg.stepFrom, leg.stepTo, 0.5f);
+            const SurfaceHit m = world.findFoothold(mid + up_ * 0.1f, up_,
+                                                    stats_.standHeight * 0.9f, 0.6f);
+            if (m.hit) highest = std::max(highest, dot(m.point - leg.stepFrom, up_));
+            if (highest > 0.12f) leg.stepClear = highest + 0.45f;
+        }
     }
 
     bobPhase_ += dt * (3.0f + speed * 1.4f);
@@ -1861,7 +1986,10 @@ void Mech::updateWeapons(float dt, const MechInput& in, std::vector<ShotRequest>
             if (lengthSq(want) > 1e-4f) {
                 want = normalize(want);
                 const float cosang = dot(want, dir);
-                if (cosang > 0.990f) {   // within ~8 degrees
+                // Within ~8 degrees; a stronger assist (the outside view)
+                // reaches a little further, to ~11.
+                const float reach = in.assistStrength > 0.6f ? 0.982f : 0.990f;
+                if (cosang > reach) {
                     const float w2 = clampf(in.assistStrength, 0.0f, 0.95f);
                     dir = normalize(lerp(dir, want, w2));
                 }
@@ -2096,12 +2224,55 @@ void Mech::update(float dt, const World& world, const MechInput& in,
                                   -0.070f, 0.070f) * levelness;
     Mat4 leanM = Mat4::rotationX(leanPitch) * Mat4::rotationZ(leanRoll);
 
+    // Stepping over things. Two body-frame motions, both cosmetic: the hull
+    // FOLLOWS ITS FEET - front feet up on a rock and rear feet still on the
+    // dirt pitch the nose up, the way a real walker's body rides its legs
+    // rather than floating level above them - and a lift assist in progress
+    // adds a nod and a heave so the machine visibly hauls itself up and over
+    // instead of gliding through the lump.
+    stepOver_ = std::max(0.0f, stepOver_ - dt * 1.6f);
+    // The step raise is re-asserted every frame the lump is still ahead and
+    // bleeds off once it is not, so the body comes back down on the far side
+    // at a walk rather than dropping. The smoothed copy is what the ride
+    // height and the hull collision actually use.
+    stepRaise_ = std::max(0.0f, stepRaise_ - dt * 2.6f);
+    stepRaiseNow_ = damp(stepRaiseNow_, stepRaise_, 9.0f, dt);
+    {
+        // Height of the front pair against the rear pair, in the body's own
+        // frame, from planted feet only.
+        const Mat4 invB = invertRigid(bodyXform_);
+        float front = 0.0f, rear = 0.0f; int nf = 0, nr = 0;
+        float frontZ = 0.0f, rearZ = 0.0f;
+        for (size_t i = 0; i < legs_.size(); ++i) {
+            const Leg& l = legs_[i];
+            if (!l.planted) continue;
+            const Vec3 lp = transformPoint(invB, l.foot);
+            if (i / 2 == 0) { front += lp.y; frontZ += lp.z; ++nf; }
+            else if (i / 2 == 2) { rear += lp.y; rearZ += lp.z; ++nr; }
+        }
+        float want = 0.0f;
+        // Ground only, and not for a moment during a climb or its
+        // aftermath: the hips ride on this frame, so a pitch at the lip
+        // moved the front hooks and broke the top-out (found by the ctrl
+        // TOPOUT gate, which is why that gate exists).
+        const bool groundOnly = !climbing_ && crestEase_ <= 0.0f && climbPose_ < 0.02f &&
+                                state_ != MechState::Airborne;
+        if (nf > 0 && nr > 0 && groundOnly) {
+            const float dy = front / nf - rear / nr;
+            const float dz = std::max(frontZ / nf - rearZ / nr, 1.0f);
+            want = clampf(std::atan2(dy, dz), -0.30f, 0.30f);
+        }
+        footPitch_ = damp(footPitch_, want, 6.0f, dt);
+    }
+    const float stepNod = std::sin(clampf(stepOver_, 0.0f, 1.0f) * PI) * 0.08f;
+    leanM = leanM * Mat4::rotationX(-(footPitch_ * 0.55f + stepNod) * levelness);
+
     // The pull-up. On a wall the body does not glide, it surges: each tripod's
     // grip hauls the hull a hand-width up the face with a nod into the wall,
     // eased in and out so grabbing or leaving the wall never pops. Purely a
     // body-frame motion - pos_ and the physics never see it.
     climbPose_ = damp(climbPose_, climbing_ ? 1.0f : 0.0f, 5.0f, dt);
-    Vec3 heaveOff(0.0f, 0.0f, 0.0f);
+    Vec3 heaveOff = up_ * (std::sin(clampf(stepOver_, 0.0f, 1.0f) * PI) * 0.12f * bulk_);
     if (climbPose_ > 0.01f) {
         const float ph = gaitPhase_ * TAU * 2.0f;    // one surge per tripod
         heaveOff = up_ * (std::sin(ph) * 0.085f * bulk_ * climbPose_);

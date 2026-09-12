@@ -61,6 +61,13 @@ public:
     // chains run along. Missions on water maps lay their lane along this so
     // the objective path actually follows the bridges.
     float mainAxisAngle() const { return mainAxisAngle_; }
+    // The mission lane: where a route from one end of the map to the other
+    // runs, as a curve. t=0 is one end, 1 the other. Land lanes take one
+    // gentle S across the structural axis; water lanes are the causeway
+    // line. The campaign places objectives on it and the world lines it
+    // with road furniture, so both read the same curve. `sweepScale`
+    // shrinks the bend (convoys run straighter).
+    Vec3 laneAt(float t, float sweepScale = 1.0f) const;
     bool hasWater() const { return arena_.waterLevel > -9000.0f; }
     const ArenaDef& arena() const { return arena_; }
     const std::vector<Obstacle>& obstacles() const { return obstacles_; }
@@ -86,8 +93,14 @@ public:
     // Pushes a sphere out of solid geometry. `outNormal` receives the surface
     // normal of the deepest contact, which the mech uses to decide whether the
     // thing it just walked into is climbable.
+    // `stepOverTop`: obstacles whose top lies below this world height are
+    // not collided with at all - they are ground to be walked ONTO. A walker
+    // steps over a rock or a rubble pile the way a wheeled vehicle cannot,
+    // and the hull sphere treating them as walls was what made every kerb a
+    // stop. The legs and the ride-height spring lift the body over them.
     Vec3 resolveCollision(const Vec3& desired, float radius,
-                          Vec3* outNormal = nullptr, ObstacleKind* outKind = nullptr) const;
+                          Vec3* outNormal = nullptr, ObstacleKind* outKind = nullptr,
+                          float stepOverTop = -1e9f) const;
 
     // True if the point is inside any solid.
     bool insideSolid(const Vec3& p, float margin = 0.0f) const;
@@ -129,6 +142,8 @@ private:
     int bunkerFirst_ = 0, bunkerCount_ = 0;
     int rubbleFirst_ = 0, rubbleCount_ = 0;
     int mastFirst_ = 0, mastCount_ = 0;
+    int lampFirst_ = 0, lampCount_ = 0;
+    int pylonFirst_ = 0, pylonCount_ = 0;
     int causewayFirst_ = 0, causewayCount_ = 0;
     int galleryFirst_ = 0, galleryCount_ = 0;
     Mesh waterMesh_;               // one big quad at the waterline

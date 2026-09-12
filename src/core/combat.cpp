@@ -130,6 +130,7 @@ void Combat::spawnShots(const std::vector<ShotRequest>& shots, Rng& rng) {
         // smoke puff; the flash IS the weight of the shot.
         Effect e;
         e.pos = s.origin;
+        e.shooter = s.shooter;
         e.color = w.tracerColor * 1.5f;
         e.radius = 0.20f + w.damage * 0.010f;
         e.growth = 2.6f + w.damage * 0.05f;
@@ -137,6 +138,7 @@ void Combat::spawnShots(const std::vector<ShotRequest>& shots, Rng& rng) {
         effects_.push_back(e);
         if (w.damage >= 30.0f) {
             Effect sm;
+            sm.shooter = s.shooter;
             sm.pos = s.origin + normalize(s.direction) * 1.2f;
             sm.vel = normalize(s.direction) * 2.0f + Vec3(0.0f, 1.2f, 0.0f);
             sm.color = Vec3(0.34f, 0.33f, 0.30f);
@@ -577,17 +579,30 @@ void Combat::dropSalvage(const Mech& victim, Rng& rng) {
 
 int Combat::liveProjectiles() const { return static_cast<int>(shots_.size()); }
 
-void Combat::submit(Rasterizer& raster, const Vec3& viewPos) const {
+void Combat::submit(Rasterizer& raster, const Vec3& viewPos, float eyeRadius) const {
     ensureMeshes();
+
+    // How much of a player-owned thing to draw at this distance from the eye
+    // in first person: nothing inside a third of the radius, ramping to full
+    // at the radius. Measured against the ROUND, so a burst that has left
+    // the machine comes into view as it goes, which is the tracer doing its
+    // job (showing where the fire is going) without doing it in your face.
+    auto ownScale = [&](const Vec3& at, int shooter) {
+        if (eyeRadius <= 0.0f || shooter != 0) return 1.0f;
+        const float d = length(at - viewPos);
+        return clampf((d - eyeRadius * 0.33f) / (eyeRadius * 0.67f), 0.0f, 1.0f);
+    };
 
     for (const Projectile& p : shots_) {
         const float sp = length(p.vel);
         if (sp < 1e-3f) continue;
+        const float own = ownScale(p.pos, p.shooter);
+        if (own <= 0.02f) continue;
         const Vec3 dir = p.vel / sp;
         // Tracers stretch with speed: a slow plasma bolt is a ball, a lance
         // round is a streak. That difference is the visual cue for how much
         // you have to lead.
-        const float len = p.tracerLength * clampf(sp / 200.0f, 0.35f, 1.8f);
+        const float len = p.tracerLength * clampf(sp / 200.0f, 0.35f, 1.8f) * (0.4f + 0.6f * own);
 
         Vec3 up(0.0f, 1.0f, 0.0f);
         if (std::fabs(dot(dir, up)) > 0.98f) up = Vec3(1.0f, 0.0f, 0.0f);
@@ -598,8 +613,9 @@ void Combat::submit(Rasterizer& raster, const Vec3& viewPos) const {
         it.mesh = &tracerMesh_;
         it.model = Mat4::translation(p.pos) *
                    Mat4::basis(right, realUp, dir) *
-                   Mat4::scaling(Vec3(p.tracerRadius, p.tracerRadius, len));
-        it.tint = p.color;
+                   Mat4::scaling(Vec3(p.tracerRadius * (0.35f + 0.65f * own),
+                                      p.tracerRadius * (0.35f + 0.65f * own), len));
+        it.tint = p.color * (0.45f + 0.55f * own);
         it.emissive = 1.0f;
         it.rim = 0.0f;
         raster.submit(it);
@@ -607,12 +623,14 @@ void Combat::submit(Rasterizer& raster, const Vec3& viewPos) const {
 
     for (const Effect& e : effects_) {
         const float t = clampf(e.life / std::max(e.maxLife, 1e-4f), 0.0f, 1.0f);
+        const float own = ownScale(e.pos, e.shooter);
+        if (own <= 0.02f) continue;
         DrawItem it;
         it.mesh = &blastMesh_;
-        it.model = Mat4::translation(e.pos) * Mat4::scaling(Vec3(e.radius));
+        it.model = Mat4::translation(e.pos) * Mat4::scaling(Vec3(e.radius * (0.3f + 0.7f * own)));
         // Fades by dimming rather than by alpha: the rasterizer is opaque-only,
         // and against the ASCII ramp a dimming ball reads as a dying flash.
-        it.tint = e.color * (0.25f + 0.75f * t);
+        it.tint = e.color * (0.25f + 0.75f * t) * (0.5f + 0.5f * own);
         it.emissive = 1.0f;
         it.rim = 0.0f;
         raster.submit(it);

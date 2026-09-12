@@ -435,8 +435,14 @@ const std::vector<ArenaDef>& arenaCatalog() {
         // the stretch automatically in placeStructures, and the extra open
         // ground IS the long-range game. Water arenas keep their size: the
         // causeway chains are counted by hand and must reach the far shore.
+        // (Was 1.30. The route used to be a serpentine that crossed the
+        // district three times to make a long march out of a short arena;
+        // the user asked for LINEAR missions about twice as long, so the
+        // ground itself is now long - a mile and a half of it - and the
+        // lane is one gentle sweep down the middle. Generation is cheap,
+        // and everything that draws or queries is distance-culled.)
         for (ArenaDef& d : a)
-            if (d.waterLevel <= 0.0f) d.extent *= 1.30f;
+            if (d.waterLevel <= 0.0f) d.extent *= 4.6f;
 
         return a;
     }();

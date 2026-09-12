@@ -151,6 +151,11 @@ public:
 
     void submit(Rasterizer& raster, const Vec3& viewPos) const;
 
+    // Advances the corpse: infantry topple and are gone in a second and a
+    // half, vehicles settle. Called for dead units in place of update().
+    void tickDead(float dt) { deadAge_ += dt; recoil_ = 0.0f; }
+    float deadAge() const { return deadAge_; }
+
 private:
     UnitKind kind_ = UnitKind::Trooper;
     Team team_ = Team::Hostile;
@@ -170,6 +175,16 @@ private:
     float pauseTimer_ = 1.0f;   // >0: waiting between bursts
     float fireCooldown_ = 0.0f;
     float animPhase_ = 0.0f;    // legs / wheels / rotors
+    // Animation state that is not locomotion: how long dead, the gun's
+    // recoil travel (1 at the shot, decaying), the hull's roll into a turn
+    // and pitch under acceleration, and the last frame's yaw for the rate.
+    float deadAge_ = 0.0f;
+    float recoil_ = 0.0f;
+    float yawRate_ = 0.0f;
+    float accelPitch_ = 0.0f;
+    float prevYaw_ = 0.0f;
+    Vec3 prevVel_{0.0f, 0.0f, 0.0f};
+    float stride_ = 0.0f;       // walk cycle weight: 0 standing, 1 marching
     float aiTimer_ = 0.0f;
     Vec3 wander_{0.0f, 0.0f, 1.0f};
     int mode_ = 0;
@@ -209,6 +224,12 @@ struct UnitMeshLibrary {
     // glance from a hundred metres: a long barrel on a bipod, a stubby tube
     // angled at the sky, a dish, a gantry of repair arms.
     Mesh longBarrel, bipod, mortarTube, baseplate, dish, dishMast, repairArm, walkLeg;
+    // Wave 14: what turns the silhouettes into figures and vehicles. Infantry
+    // get jointed limbs, a rifle, a power pack and shoulder plates; vehicles
+    // get tracks, road wheels, hatches, mantlets, stowage and a bullbar.
+    Mesh thigh, shin, upperArm, rifle, backpack, pauldron, visor, boot;
+    Mesh track, roadWheel, hatch, viewport, mantlet, stowage, smokeTubes, commanderCupola,
+         sandbag, rotorGuard, tailBoom, hub, fender;
     static const UnitMeshLibrary& instance();
 };
 

@@ -305,7 +305,7 @@ const std::vector<LevelDef>& campaignLevels() {
             size_t inserted = 0, k = 0;
             const size_t orig = d.objectives.size();
             for (size_t i = 0; i < orig; ++i) {
-                if (i > 0 && orig + inserted < 9) {
+                if (i > 0 && orig + inserted < 12) {
                     ObjectiveSpec m2;
                     // CLEAR, not reach: an open-ground stretch is only an
                     // objective if the guns covering it must actually die.
@@ -363,9 +363,12 @@ const std::vector<LevelDef>& campaignLevels() {
             }
             // Short chains get fighting segments on the end - the last one
             // an exfil march, the rest gun lines to break.
-            while (chain.size() < 7) {
+            // Nine stops minimum on a mile-and-a-half route: a segment every
+            // two hundred metres or so, which is a fight every forty seconds
+            // of walking rather than one every fifteen.
+            while (chain.size() < 9) {
                 ObjectiveSpec m2;
-                m2.kind = (chain.size() >= 6) ? ObjectiveKind::ReachZone
+                m2.kind = (chain.size() >= 8) ? ObjectiveKind::ReachZone
                                               : ObjectiveKind::ClearHostiles;
                 m2.advanceOnReach = true;
                 static const char* exitNames[] = {
@@ -679,8 +682,8 @@ void Mission::begin(const LevelDef& level, PlayerProfile& profile) {
         // route rather than a scavenger hunt.
         // Note the convention flip: structures use (cos, sin) in xz, the
         // mission axis uses (sin, cos) - the angle converts as PI/2 - a.
-        const float ang = (PI * 0.5f - world_.mainAxisAngle()) +
-                          (rng_.unit() < 0.5f ? 0.0f : PI);
+        laneFlip_ = rng_.unit() < 0.5f;
+        const float ang = (PI * 0.5f - world_.mainAxisAngle()) + (laneFlip_ ? PI : 0.0f);
         missionAxis_ = Vec3(std::sin(ang), 0.0f, std::cos(ang));
         const Vec3 start = lanePoint(0.0f);
         Mech& p = mechs_[0];
@@ -955,7 +958,7 @@ void Mission::update(float dt, const MechInput& playerInput) {
         const Vec3 playerPos = mechs_[0].hitCentre();
         for (size_t i = 0; i < units_.size(); ++i) {
             Unit& u = units_[i];
-            if (!u.alive()) continue;
+            if (!u.alive()) { u.tickDead(dt); continue; }
             Vec3 target = playerPos;
             if (u.team() == Team::Player) {
                 // The escort shoots hostiles near it.
@@ -1164,8 +1167,10 @@ void Mission::update(float dt, const MechInput& playerInput) {
     for (int idx : ev.unitsKilled) onUnitKilled(idx);
     for (int idx : ev.propsKilled) onPropKilled(idx);
     lastEvents_ = ev;
-    for (Destructible& d : props_)
+    for (Destructible& d : props_) {
         d.damageFlash = damp(d.damageFlash, 0.0f, 6.0f, dt);
+        if (!d.alive) d.deadAge += dt;
+    }
 
     // Stall guard. If nobody has been hit for a while and hostiles are still
     // alive, the two sides have lost each other - a skirmisher holding range
@@ -1227,12 +1232,14 @@ Vec3 Mission::lanePoint(float t, float sweepScale) const {
     // the march without needing a bigger world or a single extra hostile.
     // Water maps keep the straight run: their route IS the causeway, and a
     // sweep off it is open sea.
-    const Vec3 perpAxis(missionAxis_.z, 0.0f, -missionAxis_.x);
-    const float sweep = world_.hasWater()
-                            ? 0.0f
-                            : std::sin(t * PI * 3.0f) * extent * 0.55f * sweepScale;
-    const Vec3 want = missionAxis_ * ((t * 2.0f - 1.0f) * extent) +
-                      perpAxis * sweep;
+    // ONE gentle sweep now, not three: the user asked for linear missions,
+    // and the length comes from the arena (2.6x longer than it was) rather
+    // than from crossing it back and forth. The quarter-extent bend is
+    // enough that the far end is never in sight from the start.
+    // The curve itself lives in World::laneAt so the road furniture lines
+    // the same route; the mission only decides which end is the start.
+    const Vec3 want = world_.laneAt(laneFlip_ ? 1.0f - t : t, sweepScale);
+    (void)extent;
     // Snap to real, standable, DRY, outside-a-building ground near the ideal
     // spot. On island maps the naive lane point lands in the sea, and an
     // objective zone underwater is a mission nobody can survive reaching -
@@ -1774,6 +1781,15 @@ void Mission::onPropKilled(int idx) {
     if (idx < 0 || idx >= static_cast<int>(props_.size())) return;
     Destructible& d = props_[static_cast<size_t>(idx)];
     if (d.obstacle >= 0) world_.disableObstacle(d.obstacle);
+    // Which way it falls: away from whoever is closest to it - the player,
+    // almost always - so a chimney comes down away from the machine that
+    // shot it and a mast folds across the street.
+    {
+        const Vec3 away = flattenY(d.pos - mechs_[0].position());
+        d.fallYaw = (lengthSq(away) > 1e-3f) ? std::atan2(away.x, away.z)
+                                             : d.yaw + 1.2f;
+        d.deadAge = 0.0f;
+    }
     ledger_.propsDestroyed += 1;
     ledger_.cashDestruction += d.cashValue;
     cashEarned_ += d.cashValue;
@@ -2196,7 +2212,7 @@ void Mission::settle(PlayerProfile& profile) const {
 }
 
 void Mission::submit(Rasterizer& raster, const Vec3& viewPos,
-                     float viewDistance, bool skipPlayer) const {
+                     float viewDistance, bool skipPlayer, float eyeRadius) const {
     world_.submit(raster, viewPos, viewDistance);
     for (const Unit& u : units_) u.submit(raster, viewPos);
     for (const Destructible& d : props_) submitDestructible(raster, d, viewPos);
@@ -2207,7 +2223,7 @@ void Mission::submit(Rasterizer& raster, const Vec3& viewPos,
         if (!mechs_[i].alive()) continue;
         mechs_[i].submit(raster, viewPos);
     }
-    combat_.submit(raster, viewPos);
+    combat_.submit(raster, viewPos, eyeRadius);
 }
 
 } // namespace sb

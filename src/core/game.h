@@ -11,6 +11,7 @@
 #include "ascii.h"
 #include "audio.h"
 #include "campaign.h"
+#include "cabin.h"
 #include "math3d.h"
 #include "raster.h"
 #include "store.h"
@@ -21,6 +22,10 @@ namespace sb {
 struct InputState {
     bool forward = false, back = false, left = false, right = false;
     bool boost = false;
+    // Analog drive from a gamepad stick, -1..1 each, camera-relative like the
+    // keys (x right, y forward). Added to whatever the keys say; the vector's
+    // length is the throttle, so a half-pushed stick is a walk.
+    float moveX = 0.0f, moveY = 0.0f;
     float mouseDX = 0.0f, mouseDY = 0.0f;   // relative motion, pixels
     bool fireHeld = false;      // group 1, left mouse
     bool fire2Held = false;     // group 2, right mouse
@@ -110,6 +115,10 @@ public:
     const Rasterizer& rasterizer() const { return raster_; }
     const Camera& camera() const { return cam_; }
     GameScreen screen() const { return screen_; }
+    // Gamepad haptics, 0..1, decaying; the platform layer turns these into
+    // motor strengths. Core knows nothing about controllers.
+    float padRumbleHit() const { return rumbleHit_; }
+    float padRumbleGun() const { return rumbleGun_; }
 
     // Starts the mission the profile's level index points at.
     void startMission();
@@ -127,6 +136,9 @@ public:
 
     void setStatusLine(const std::string& s) { status_ = s; }
     void setFrameMs(float ms) { frameMs_ = damp(frameMs_, ms, 6.0f, 0.05f); }
+    // The platform pauses by not calling update(); this only tells the HUD.
+    void setPaused(bool p) { paused_ = p; }
+    bool paused() const { return paused_; }
     // Audio health from the platform layer, drawn on the HUD status line so
     // a "sound keeps cutting out" report comes back with numbers attached:
     // voices in flight, worst recent limiter gain, device underrun count.
@@ -141,6 +153,7 @@ private:
 public:
     int scopeStage() const { return scopeStage_; }
     bool firstPerson() const { return fpv_; }
+    bool inCabin() const { return fpv_ && scopeStage_ == 0 && screen_ == GameScreen::Playing; }
 private:
     void applyDisplayToggles(const InputState& in);
     MechInput buildPlayerInput(const InputState& in) const;
@@ -156,6 +169,7 @@ private:
     void drawResult(AsciiFrame& frame);
     void drawStore(AsciiFrame& frame);
     void drawCombatHud(AsciiFrame& frame);
+    void drawCabinReadouts(AsciiFrame& frame);
 
     void emitAudio(float dt, const MechInput& mi);
 
@@ -190,10 +204,17 @@ private:
     // Gunner sight and first-person drive. The scope is stages of magnified
     // first-person from the turret; FPV is an unmagnified view from the hull.
     int scopeStage_ = 0;        // 0 off, 1 low power, 2 high power
-    bool fpv_ = false;
+    // First person is the DEFAULT view: the pilot sits in the cabin and the
+    // instruments are on the console (see cabin.h). X steps outside.
+    bool fpv_ = true;
+    CabinLayout cabinLayout_;   // rebuilt whenever the loadout changes
     float camDistTarget_ = 12.0f;
     Vec3 camPos_{0.0f, 0.0f, 0.0f};
     Vec3 camFocus_{0.0f, 0.0f, 0.0f};
+    // The orbit direction the mouse has steered - where the view is HEADED,
+    // as opposed to camFocus_-camPos_, which is where the trailing boom
+    // happens to be looking this frame. Drive input is built from this.
+    Vec3 camOrbitDir_{0.0f, 0.0f, 1.0f};
     // The camera's own up vector, smoothed toward the mech's. This is what
     // keeps the machine upright on screen while it walks up a wall: the world
     // rolls around the tank instead of the tank rolling out of frame.
@@ -215,6 +236,7 @@ private:
     bool debugOrbit_ = false;
     float viewDistance_ = 250.0f;
     float frameMs_ = 16.0f;
+    bool paused_ = false;
     int audVoices_ = 0;
     float audLimFloor_ = 1.0f;
     int audUnderruns_ = 0;
@@ -230,6 +252,8 @@ private:
     // fast. Applied to the eye only, never the aim, so it reads as recoil
     // without costing accuracy.
     float shake_ = 0.0f;
+    float rumbleHit_ = 0.0f;   // gamepad haptics: hull hits (low motor)
+    float rumbleGun_ = 0.0f;   // gamepad haptics: own guns (high motor)
     // Plant-driven footfall state and the machine-noise clocks.
     bool prevStepping_[6] = {};
     float prevTurretYaw_ = 0.0f;

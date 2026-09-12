@@ -41,6 +41,11 @@ StructurePiece buildPipeRack(float len, uint32_t seed, const Vec3& tint);
 StructurePiece buildBunker(float radius, uint32_t seed, const Vec3& tint);
 StructurePiece buildRubblePile(float radius, uint32_t seed, const Vec3& tint);
 StructurePiece buildAntennaMast(float height, uint32_t seed, const Vec3& tint);
+// Road furniture along the mission lane: a street lamp (pole, arm, a lit
+// head) and a power pylon (four splayed legs, two crossarms). Both are
+// solid but neither is a climb.
+StructurePiece buildLampPost(float height, uint32_t seed, const Vec3& tint);
+StructurePiece buildPylon(float height, uint32_t seed, const Vec3& tint);
 
 // A causeway segment: a raised road deck on pillars with low side rails, for
 // island maps where the deck is the only dry path. Local origin at deck centre,

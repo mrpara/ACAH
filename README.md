@@ -104,15 +104,15 @@ causeway chains the whole battlefield.
 | `W` `A` `S` `D` | Move, relative to where the camera is looking |
 | `Shift` | Sprint — overdrives the legs past walking speed |
 | `Space` | Hold to charge a jump — release height depends on the charge |
-| Mouse | Orbit the camera; the turret tracks the crosshair |
+| Mouse | Look / aim; the turret tracks the crosshair (outside the cabin: orbit) |
 | Left click | Fire group 1 (light guns by default) |
 | Right click | Fire group 2 (medium and heavy guns by default) |
 | `1`-`4` | Toggle that weapon mount on / off |
 | `5`-`8` | Move that mount to the other trigger |
 | `Q` `E` `R` `F` | Abilities: legs / engine / armour / sensors |
 | `Z` | Gunner scope: off → x2.5 → x7 → off |
-| `X` | First-person drive view (in the workshop: sell the part) |
-| Wheel | Camera distance |
+| `X` | Step outside the cabin to the external view, and back (in the workshop: sell the part) |
+| Wheel | Camera distance (external view) |
 | `Enter` | Deploy, accept a result, open a slot, fit the highlighted part |
 | `Space` | Workshop: leave and start the next mission |
 | `<` `>` | Briefing: pick any unlocked contract to (re)play |
@@ -129,7 +129,28 @@ causeway chains the whole battlefield.
 | `F9` | Cycle supersampling 1x / 2x / 3x |
 | `-` `=` | Glyph scale, for high-DPI displays |
 | `F11` | Fullscreen (the game starts fullscreen; `--windowed` to opt out) |
-| `Esc` | Quit |
+| `Esc` | Pause; `Q` on the pause screen quits |
+
+The game starts in the **pilot's cabin**: the instruments - hull, heat,
+ability lamps, a lamp per gun, jump charge, the contact lamp and the radar
+scope - are on the console in front of you, and the cabin's frame is the
+chassis you bought (a casemate has its breech in there with you; a low-profile
+hull is a bubble on struts; a fire platform is an open cradle). Armour tier
+thickens the frame, sensor tier grows the scope. `X` steps outside to the
+third-person view, which has stronger shot tracking to make up for aiming from
+behind the machine.
+
+### Gamepad
+
+Plug in a DualShock 4 (or any pad SDL knows) before or after launch. Left
+stick drives, deflection is pace; right stick looks. `R2` / `L2` fire groups
+1 / 2; `Cross` holds a jump charge; `L1` `R1` `Square` `Circle` are the legs /
+engine / armour / sensor abilities; `Triangle` cycles the gunsight; `R3`
+steps outside the cabin; D-pad toggles mounts 1-4; `Options` pauses in the
+field and continues past briefings; `Touchpad` toggles the HUD; `Share` mutes.
+In the workshop: D-pad or stick to navigate, `Cross` fits, `Circle` backs
+out, `Triangle` compares, `Square` sells, `Options` deploys. Hull hits and
+your own guns come through the rumble motors.
 
 Command-line options: `--width N --height N --ss N --seed N --threads N
 --fullscreen --no-vsync --raw --background N --font N --ramp N --dither`.

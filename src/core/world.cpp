@@ -67,7 +67,7 @@ void World::generate(const ArenaDef& arena, uint32_t seed) {
     }
     TerrainProfile tp = arena_.terrain;
     if (tp.canyonDepth > 0.01f) tp.canyonAxis = mainAxisAngle_;
-    terrain_.generate(tp, s, arena_.extent, 21.0f, 2.1f);
+    terrain_.generate(tp, s, arena_.extent, 21.0f, 3.0f);
 
     meshes_.clear();
     pieces_.clear();
@@ -198,6 +198,14 @@ void World::buildMeshLibrary(uint32_t seed) {
     push(buildRubblePile(2.1f, seed + 193u, arena_.concreteTint * 0.9f));
     push(buildRubblePile(4.6f, seed + 197u, arena_.concreteTint * 1.05f));
 
+    lampFirst_ = static_cast<int>(meshes_.size());
+    lampCount_ = 2;
+    push(buildLampPost(8.5f, seed + 301u, Vec3(0.40f, 0.42f, 0.44f)));
+    push(buildLampPost(9.5f, seed + 311u, Vec3(0.36f, 0.38f, 0.41f)));
+    pylonFirst_ = static_cast<int>(meshes_.size());
+    pylonCount_ = 1;
+    push(buildPylon(26.0f, seed + 331u, Vec3(0.42f, 0.44f, 0.47f)));
+
     mastFirst_ = static_cast<int>(meshes_.size());
     mastCount_ = 2;
     push(buildAntennaMast(16.0f, seed + 211u, Vec3(0.32f, 0.33f, 0.34f)));
@@ -271,7 +279,7 @@ void World::placeStructures(uint32_t seed) {
     // avenue of city down the lane, which is what makes a mission read as
     // driving THROUGH somewhere rather than orbiting a knot of buildings.
     const float stretch = clampf((arena_.extent * 0.72f) / std::max(R, 1.0f),
-                                 1.0f, 2.8f);
+                                 1.0f, 6.0f);
     const float axC = std::cos(lineAngle), axS = std::sin(lineAngle);
     auto elongate = [&](const Vec3& s) {
         const float along = (s.x * axC + s.z * axS) * stretch;
@@ -445,6 +453,58 @@ void World::placeStructures(uint32_t seed) {
     scatterFamily(bunkerFirst_, bunkerCount_, arena_.bunkerCount, R * 1.15f, 3.0f, true);
     scatterFamily(rubbleFirst_, rubbleCount_, arena_.rubbleCount, R * 1.25f, 1.0f, false);
     scatterFamily(mastFirst_, mastCount_, arena_.mastCount, R * 1.3f, 6.0f, true);
+
+    // ---- road furniture along the lane ------------------------------------
+    // The route is a mile and a half long now, and most of it crosses open
+    // ground between the built-up stretches. Street lamps every forty
+    // metres, alternating sides, and a pylon line every hundred and sixty,
+    // make the lane READ as a road from a long way off - which is what
+    // "linear" needs to feel like: a road to follow, not a compass bearing.
+    if (arena_.waterLevel <= 0.0f && arena_.layout != DistrictLayout::None) {
+        const float laneLen = length(laneAt(1.0f) - laneAt(0.0f)) * 1.05f;
+        const int lamps = static_cast<int>(laneLen / 40.0f);
+        for (int i = 0; i < lamps; ++i) {
+            const float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(lamps);
+            const Vec3 here = laneAt(t);
+            const Vec3 ahead = laneAt(std::min(1.0f, t + 0.01f));
+            Vec3 dir = flattenY(ahead - here);
+            if (lengthSq(dir) < 1e-4f) continue;
+            dir = normalize(dir);
+            const Vec3 perp(dir.z, 0.0f, -dir.x);
+            const float side = (i & 1) ? 1.0f : -1.0f;
+            Vec3 spot = here + perp * (side * 13.0f);
+            if (std::fabs(spot.x) > arena_.extent - 12.0f || std::fabs(spot.z) > arena_.extent - 12.0f) continue;
+            if (terrain_.slope(spot.x, spot.z) > 0.42f) continue;
+            if (lengthXZ(spot) < arena_.spawnClear * 0.55f) continue;
+            const int variant = lampFirst_ + static_cast<int>(rng.unit() * lampCount_) % lampCount_;
+            if (!spotIsClear(spot, 3.0f)) continue;
+            spot.y = terrain_.height(spot.x, spot.z) - 0.1f;
+            // The arm reaches over the road: face the lane.
+            const float yaw = std::atan2(-perp.x * side, -perp.z * side);
+            addStructure(variant, spot, yaw, 1.0f, Vec3(1.0f), false);
+            // A pylon every fourth lamp, well back from the road, one side.
+            if (i % 4 == 2) {
+                Vec3 ps = here + perp * -42.0f;
+                if (std::fabs(ps.x) > arena_.extent - 14.0f || std::fabs(ps.z) > arena_.extent - 14.0f) continue;
+                if (terrain_.slope(ps.x, ps.z) > 0.40f) continue;
+                if (!spotIsClear(ps, 6.0f)) continue;
+                ps.y = terrain_.height(ps.x, ps.z) - 0.2f;
+                addStructure(pylonFirst_, ps, std::atan2(dir.x, dir.z) + PI * 0.5f, 1.0f, Vec3(1.0f), true);
+            }
+        }
+    }
+}
+
+Vec3 World::laneAt(float t, float sweepScale) const {
+    const float ang = PI * 0.5f - mainAxisAngle_;
+    const Vec3 axis(std::sin(ang), 0.0f, std::cos(ang));
+    const Vec3 perp(axis.z, 0.0f, -axis.x);
+    const float ext = arena_.extent * (hasWater() ? 0.68f : 0.92f);
+    // One S across the axis (sin 2*pi*t): the same curve whichever end the
+    // mission starts from, which is what lets the furniture be placed once.
+    const float sweep = hasWater() ? 0.0f
+                                   : std::sin(t * TAU) * ext * 0.12f * sweepScale;
+    return axis * ((t * 2.0f - 1.0f) * ext) + perp * sweep;
 }
 
 void World::scatterProps(uint32_t seed) {
@@ -658,7 +718,8 @@ SurfaceHit World::findFoothold(const Vec3& searchPoint, const Vec3& up,
 }
 
 Vec3 World::resolveCollision(const Vec3& desired, float radius,
-                             Vec3* outNormal, ObstacleKind* outKind) const {
+                             Vec3* outNormal, ObstacleKind* outKind,
+                             float stepOverTop) const {
     Vec3 p = clampToWorld(desired, radius + 2.0f);
     float deepest = 0.0f;
     if (outNormal) *outNormal = Vec3(0.0f, 1.0f, 0.0f);
@@ -670,6 +731,7 @@ Vec3 World::resolveCollision(const Vec3& desired, float radius,
         for (int idx : scratch_) {
             const Obstacle& o = obstacles_[static_cast<size_t>(idx)];
             if (!o.active) continue;
+            if (o.center.y + o.half.y < stepOverTop) continue;   // step onto it
             Vec3 push, normal;
             if (!resolveSphereObstacle(o, p, radius, push, normal)) continue;
             p += push;

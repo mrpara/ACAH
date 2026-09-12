@@ -119,6 +119,10 @@ private:
     Vec3 breakTo_{0.0f, 0.0f, 0.0f};
     Vec3 lastPerch_{0.0f, 0.0f, 0.0f};
     bool hasLastPerch_ = false;
+    Vec3 failedClimb_{0.0f, 0.0f, 0.0f};   // a face this machine could not get up
+    bool hasFailedClimb_ = false;
+    int climbFails_ = 0;                    // consecutive failed ascents
+    float climbStall_ = 0.0f;               // seconds pressed at a face, going nowhere
     Vec3 pickBreakPoint(const World& world, const Mech& self, const Mech& target);
     bool hunting_ = false;
     bool haveSeen_ = false;

@@ -180,7 +180,7 @@ public:
     void update(float dt, const MechInput& playerInput);
 
     void submit(Rasterizer& raster, const Vec3& viewPos, float viewDistance,
-                bool skipPlayer = false) const;
+                bool skipPlayer = false, float eyeRadius = 0.0f) const;
 
     // ------------------------------------------------------------- state ----
     MissionPhase phase() const { return phase_; }
@@ -334,6 +334,7 @@ private:
     float reinforceTimer_ = 0.0f;
     float shellTimer_ = 0.0f;          // Breakthrough: the walking barrage
     Vec3 missionAxis_{0.0f, 0.0f, 1.0f};
+    bool laneFlip_ = false;      // the mission runs the lane end-to-start
     Vec3 checkpointPos_{0.0f, 0.0f, 0.0f};
     float checkpointHealth_ = 1.0f;    // fraction restored on respawn
     int segmentWavesSpawned_ = 0;

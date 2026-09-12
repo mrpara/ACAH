@@ -110,7 +110,12 @@ Vec3 AiController::pickClimbTarget(const World& world, const Mech& self,
 
     const bool stalker = (cfg_.archetype == Archetype::Stalker);
     for (const Obstacle& o : obs) {
-        if (!o.climbable) continue;
+        if (!o.climbable || !o.active) continue;
+        // Nothing pole-shaped, whatever it is flagged as: a climb needs a
+        // FACE the feet can spread across, and a perch needs deck.
+        // (Buildings are hollow: their walls are half-metre slabs, so
+        // thinness alone says nothing. A pole is thin BOTH ways.)
+        if (o.kind == ObstacleKind::Pillar || std::max(o.half.x, o.half.z) < 2.0f) continue;
         const float h = o.half.y * 2.0f;
         // A stalker wants a TOWER, not a garden wall: it is going up there to
         // shoot over a district, and a six-metre block gives it neither the
@@ -142,6 +147,12 @@ Vec3 AiController::pickClimbTarget(const World& world, const Mech& self,
             if (hasLastPerch_ && lengthXZ(o.center - lastPerch_) < 22.0f)
                 score += 900.0f;
         }
+        // A face this machine already failed to get up is not tried again
+        // this fight. Whatever the reason - a ledge it could not read, a
+        // wall it kept peeling off - repeating the attempt is the behaviour
+        // the player reported as "ignores me and scrabbles at a wall".
+        if (hasFailedClimb_ && lengthXZ(o.center - failedClimb_) < 16.0f)
+            score += 900.0f;
         if (score < best) {
             best = score;
             // Approach the face that looks at us.
@@ -271,12 +282,56 @@ void AiController::chooseState(const World& world, const Mech& self,
             return;
         }
 
+        if (state_ == AiState::Engage) {
+            // Grounded gunnery after the towers let it down: hold the range
+            // and shoot like a sniper until the timer says try the roofs
+            // again. Without this a stalker with no usable wall in reach
+            // walked in circles between Climb and Approach and never fought.
+            if (stateTimer_ > 0.0f) {
+                if (range < 30.0f) {
+                    breakTo_ = pickBreakPoint(world, self, target);
+                    state_ = AiState::Break;
+                    stateTimer_ = 6.0f;
+                }
+                return;
+            }
+            climbFails_ = 0;
+        }
+
         if (state_ == AiState::Climb) {
             // Up and in position: settle and start shooting.
             if (elevated && !self.onWall()) {
                 state_ = AiState::Perch;
                 exposure_ = 0.0f;
                 stateTimer_ = 20.0f;
+                climbFails_ = 0;
+                return;
+            }
+            // Getting nowhere. Three seconds pressed at a face with no
+            // daylight under the machine means this face is not going to
+            // work; remember it, and either try another or - after two of
+            // those - fight from the street for a while instead.
+            const float climbed = self.position().y -
+                                  world.terrain().height(self.position().x,
+                                                         self.position().z);
+            const bool atFace = lengthXZ(climbTarget_ - self.position()) < 6.0f;
+            if (atFace) climbStall_ += decisionTimer_ + 0.05f;
+            else climbStall_ = 0.0f;
+            if (climbStall_ > 3.0f && climbed < 3.5f && !self.onWall()) {
+                failedClimb_ = climbCentre_;
+                hasFailedClimb_ = true;
+                climbStall_ = 0.0f;
+                if (++climbFails_ >= 2) {
+                    state_ = AiState::Engage;
+                    stateTimer_ = 16.0f;
+                    return;
+                }
+                climbTarget_ = pickClimbTarget(world, self, target);
+                if (!hasClimbTarget_) {
+                    state_ = AiState::Engage;
+                    stateTimer_ = 16.0f;
+                }
+                stateTimer_ = std::max(stateTimer_, 11.0f);
                 return;
             }
             // Abandon a climb the enemy has caught. Half way up a wall is the
@@ -297,6 +352,14 @@ void AiController::chooseState(const World& world, const Mech& self,
                 return;
             }
             if (stateTimer_ > 0.0f) return;
+            // The climb timed out without a perch: that is a failure too.
+            failedClimb_ = climbCentre_;
+            hasFailedClimb_ = true;
+            if (++climbFails_ >= 2) {
+                state_ = AiState::Engage;
+                stateTimer_ = 16.0f;
+                return;
+            }
             state_ = AiState::Approach;
             return;
         }
@@ -319,8 +382,13 @@ void AiController::chooseState(const World& world, const Mech& self,
         if (hasClimbTarget_) {
             state_ = AiState::Climb;
             stateTimer_ = 11.0f;
+            climbStall_ = 0.0f;
         } else {
-            state_ = AiState::Approach;
+            // No tower in reach: shoot from the ground rather than walk at
+            // the player hoping one turns up. The Engage timer sends it back
+            // to looking for roofs later.
+            state_ = AiState::Engage;
+            stateTimer_ = 12.0f;
         }
         return;
     }

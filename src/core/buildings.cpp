@@ -87,6 +87,9 @@ StructurePiece buildRuin(const RuinSpec& spec) {
 
     // ---- foundation ------------------------------------------------------
     addBox(out.mesh, Vec3(0.0f, 0.22f, 0.0f), Vec3(hw + 0.5f, 0.22f, hd + 0.5f), concreteDark, 0.12f);
+    // Decided up front so the canopy and the collision doorway agree.
+    const int doorSide = static_cast<int>(rng.unit() * 4.0f) & 3;
+    const int escapeSide = (doorSide + 1 + (static_cast<int>(rng.unit() * 3.0f))) & 3;
 
     // ---- floors ----------------------------------------------------------
     // Upper floors are progressively more ruined; the topmost is usually a
@@ -117,6 +120,62 @@ StructurePiece buildRuin(const RuinSpec& spec) {
         addWallRun(out.mesh, rng, 1, -1.0f, hd - 0.4f, hw - wallT, y0 + 0.28f, y1, wallT, concrete, openness, ground);
         addWallRun(out.mesh, rng, 1,  1.0f, hd - 0.4f, hw - wallT, y0 + 0.28f, y1, wallT, concrete, openness, ground);
 
+        // ---- facade character, per style -----------------------------------
+        // What makes one block not read as every other block. Everything
+        // here is proud of the wall plane by a hand's width or more, because
+        // at ASCII scale a detail that does not change the silhouette or
+        // cast a step in the shading does not exist.
+        if (spec.style == 0) {
+            // Tower block: a spandrel band under every floor, and balconies
+            // on some floors of the long faces.
+            for (int sz = -1; sz <= 1; sz += 2)
+                addBox(out.mesh, Vec3(0.0f, y0 + 0.30f, sz * (hd + 0.10f)), Vec3(hw, 0.30f, 0.12f), concreteLight);
+            for (int sx = -1; sx <= 1; sx += 2)
+                addBox(out.mesh, Vec3(sx * (hw + 0.10f), y0 + 0.30f, 0.0f), Vec3(0.12f, 0.30f, hd), concreteLight);
+            if (f > 0 && rng.unit() < 0.45f) {
+                const float sz = rng.unit() < 0.5f ? -1.0f : 1.0f;
+                const float bx = rng.range(-hw * 0.5f, hw * 0.5f);
+                addBox(out.mesh, Vec3(bx, y0 + 0.62f, sz * (hd + 0.75f)), Vec3(1.8f, 0.10f, 0.75f), concrete);
+                addBox(out.mesh, Vec3(bx, y0 + 1.05f, sz * (hd + 1.45f)), Vec3(1.8f, 0.42f, 0.06f), concreteDark);
+            }
+        } else if (spec.style == 1) {
+            // Warehouse: corrugation ribs down the long faces, a roll door
+            // and a loading dock at ground level.
+            const int ribs = std::max(2, static_cast<int>(hw / 2.4f));
+            for (int i = 0; i <= ribs; ++i) {
+                const float x = -hw + (2.0f * hw) * (static_cast<float>(i) / ribs);
+                for (int sz = -1; sz <= 1; sz += 2)
+                    addBox(out.mesh, Vec3(x, (y0 + y1) * 0.5f, sz * (hd + 0.08f)),
+                           Vec3(0.16f, fh * 0.5f, 0.10f), concreteDark);
+            }
+            if (ground) {
+                addBox(out.mesh, Vec3(hw * 0.2f, y0 + 1.9f, -(hd + 0.02f)), Vec3(2.4f, 1.7f, 0.12f), rust * 0.8f);
+                addBox(out.mesh, Vec3(hw * 0.2f, y0 + 0.35f, -(hd + 1.4f)), Vec3(3.2f, 0.35f, 1.3f), concreteDark);
+            }
+        } else if (spec.style == 2) {
+            // Office: a dark glazing band under each head - the recessed
+            // curtain wall - and a lighter pier grid over it.
+            for (int sz = -1; sz <= 1; sz += 2)
+                addBox(out.mesh, Vec3(0.0f, y0 + fh * 0.55f, sz * (hd - wallT * 0.5f)),
+                       Vec3(hw - 0.6f, fh * 0.22f, 0.06f), concreteDark * 0.55f);
+            for (int sx = -1; sx <= 1; sx += 2)
+                addBox(out.mesh, Vec3(sx * (hw - wallT * 0.5f), y0 + fh * 0.55f, 0.0f),
+                       Vec3(0.06f, fh * 0.22f, hd - 0.6f), concreteDark * 0.55f);
+        }
+        // Fire escape: a zigzag of stair flights and landings up one face.
+        if ((spec.style == 0 || spec.style == 2) && f < floors - 1) {
+            const bool alongX = (escapeSide < 2);
+            const float sgn = (escapeSide & 1) ? 1.0f : -1.0f;
+            const float off = (alongX ? hd : hw) + 0.9f;
+            const float run = (f & 1) ? 1.0f : -1.0f;
+            const Vec3 a = alongX ? Vec3(-run * 2.2f, y0 + 0.3f, sgn * off) : Vec3(sgn * off, y0 + 0.3f, -run * 2.2f);
+            const Vec3 b = alongX ? Vec3(run * 2.2f, y1 + 0.3f, sgn * off) : Vec3(sgn * off, y1 + 0.3f, run * 2.2f);
+            Mesh flight = makeBox(Vec3(0.5f, 0.5f, 0.5f), rust);
+            appendMesh(out.mesh, flight, segmentTransform(a, b, 0.22f) * Mat4::scaling(Vec3(2.6f, 1.0f, 0.5f)));
+            addBox(out.mesh, alongX ? Vec3(run * 2.6f, y1 + 0.3f, sgn * off) : Vec3(sgn * off, y1 + 0.3f, run * 2.6f),
+                   alongX ? Vec3(0.8f, 0.06f, 0.7f) : Vec3(0.7f, 0.06f, 0.8f), rust);
+        }
+
         // Interior partition stubs, visible through the blown-out walls.
         if (spec.style != 3 && rng.unit() < 0.7f) {
             const float px = rng.range(-hw * 0.5f, hw * 0.5f);
@@ -135,6 +194,17 @@ StructurePiece buildRuin(const RuinSpec& spec) {
             addBox(out.mesh, Vec3(0.0f, topY + 0.55f, sz * (hd - 0.2f)), Vec3(hw, 0.34f, 0.18f), concrete);
         for (int sx = -1; sx <= 1; sx += 2)
             addBox(out.mesh, Vec3(sx * (hw - 0.2f), topY + 0.55f, 0.0f), Vec3(0.18f, 0.34f, hd), concrete);
+        // Rooftop plant: a stair bulkhead on every roof, a water tank on
+        // legs for the residential and office styles.
+        addBox(out.mesh, Vec3(hw * 0.45f, topY + 1.25f, hd * 0.35f), Vec3(1.5f, 1.05f, 1.3f), concrete, 0.08f);
+        if (spec.style == 0 || spec.style == 2) {
+            const Vec3 tc(-hw * 0.4f, topY, -hd * 0.3f);
+            for (int sx = -1; sx <= 1; sx += 2)
+                for (int sz = -1; sz <= 1; sz += 2)
+                    addBox(out.mesh, tc + Vec3(sx * 0.9f, 1.0f, sz * 0.9f), Vec3(0.09f, 1.0f, 0.09f), rust);
+            Mesh tank = makeCylinder(1.35f, 1.35f, 2.0f, 8, true, true, rust * 1.1f);
+            appendMesh(out.mesh, tank, Mat4::translation(tc + Vec3(0.0f, 2.0f, 0.0f)));
+        }
         // Rooftop clutter.
         const int clutter = 2 + static_cast<int>(rng.unit() * 3.0f);
         for (int i = 0; i < clutter; ++i) {
@@ -201,6 +271,18 @@ StructurePiece buildRuin(const RuinSpec& spec) {
         }
     }
 
+    // ---- entrance canopy over the doorway side --------------------------
+    if (spec.style != 3) {
+        const bool alongX = (doorSide < 2);
+        const float sgn = (doorSide & 1) ? 1.0f : -1.0f;
+        const float off = (alongX ? hd : hw) + 1.2f;
+        addBox(out.mesh, alongX ? Vec3(0.0f, 3.3f, sgn * off) : Vec3(sgn * off, 3.3f, 0.0f),
+               alongX ? Vec3(2.8f, 0.12f, 1.2f) : Vec3(1.2f, 0.12f, 2.8f), concreteLight);
+        for (int k = -1; k <= 1; k += 2)
+            addBox(out.mesh, alongX ? Vec3(k * 2.4f, 1.7f, sgn * (off + 0.9f)) : Vec3(sgn * (off + 0.9f), 1.7f, k * 2.4f),
+                   Vec3(0.12f, 1.6f, 0.12f), concreteDark);
+    }
+
     // ---- ground-level damage --------------------------------------------
     const int scars = 3 + static_cast<int>(rng.unit() * 4.0f);
     for (int i = 0; i < scars; ++i) {
@@ -220,7 +302,6 @@ StructurePiece buildRuin(const RuinSpec& spec) {
     // with a doorway gap in one of them so the interior stays usable as cover.
     const float wallHalfH = (topY) * 0.5f;
     const float wallCenterY = topY * 0.5f;
-    const int doorSide = static_cast<int>(rng.unit() * 4.0f) & 3;
     const float doorHalf = 2.0f;
 
     for (int side = 0; side < 4; ++side) {
@@ -427,11 +508,78 @@ StructurePiece buildAntennaMast(float height, uint32_t seed, const Vec3& tint) {
     out.mesh.computeBounds();
     out.height = height + 0.9f;
     out.radius = 1.6f;
+    // A metre-wide lattice mast is nothing a ten-metre walker can hold: the
+    // feet cannot spread on it and the hull has nothing to press against. It
+    // is solid, it is not a climb - the MAGPIE used to pick it as a perch
+    // (tallest thing around) and spend the duel scrabbling at a pole.
     out.obstacles.push_back(box(Vec3(0.0f, height * 0.5f, 0.0f), Vec3(0.55f, height * 0.5f, 0.55f),
-                                ObstacleKind::Pillar));
+                                ObstacleKind::Pillar, false));
     return out;
 }
 
+
+StructurePiece buildLampPost(float height, uint32_t seed, const Vec3& tint) {
+    StructurePiece out;
+    Rng rng(seed);
+    const Vec3 steel = tint * 0.55f;
+    // Base plinth, pole, a curved-ish arm out over the road, the lamp head.
+    addBox(out.mesh, Vec3(0.0f, 0.25f, 0.0f), Vec3(0.45f, 0.25f, 0.45f), steel * 0.8f, 0.08f);
+    Mesh pole = makeCylinder(0.16f, 0.11f, height, 6, false, true, steel);
+    appendMesh(out.mesh, pole, Mat4::translation(Vec3(0.0f, 0.4f, 0.0f)));
+    const float armLen = 2.6f;
+    Mesh arm = makeCylinder(0.09f, 0.07f, armLen, 5, false, true, steel);
+    appendMesh(out.mesh, arm, Mat4::translation(Vec3(0.0f, height + 0.2f, 0.0f)) *
+                                  Mat4::rotationX(PI * 0.5f - 0.18f));
+    // The head: a box with a lit underside panel.
+    addBox(out.mesh, Vec3(0.0f, height + 0.62f, armLen * 0.95f), Vec3(0.28f, 0.14f, 0.55f), steel, 0.05f);
+    addBox(out.mesh, Vec3(0.0f, height + 0.47f, armLen * 0.95f), Vec3(0.22f, 0.02f, 0.45f),
+           Vec3(1.6f, 1.45f, 1.1f));
+    (void)rng;
+    out.mesh.computeBounds();
+    out.height = height + 0.8f;
+    out.radius = 0.7f;
+    out.obstacles.push_back(box(Vec3(0.0f, height * 0.5f, 0.0f), Vec3(0.18f, height * 0.5f, 0.18f),
+                                ObstacleKind::Pillar, false));
+    return out;
+}
+
+StructurePiece buildPylon(float height, uint32_t seed, const Vec3& tint) {
+    StructurePiece out;
+    Rng rng(seed);
+    const Vec3 steel = tint * 0.5f;
+    // Four legs splayed at the base, meeting a narrow waist two thirds up,
+    // then a straight mast with two crossarms carrying insulators.
+    const float baseHalf = 2.6f, waistHalf = 0.7f, waistY = height * 0.62f;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sz = -1; sz <= 1; sz += 2) {
+            const Vec3 a(sx * baseHalf, 0.0f, sz * baseHalf);
+            const Vec3 b(sx * waistHalf, waistY, sz * waistHalf);
+            Mesh leg = makeCylinder(1.0f, 0.7f, 1.0f, 4, false, false, steel);
+            appendMesh(out.mesh, leg, segmentTransform(a, b, 0.16f));
+            // Lattice bracing: a few diagonals between neighbouring legs.
+            const Vec3 c(-sx * baseHalf * 0.75f, waistY * 0.35f, sz * baseHalf * 0.75f);
+            Mesh brace = makeCylinder(1.0f, 1.0f, 1.0f, 4, false, false, steel * 0.9f);
+            appendMesh(out.mesh, brace, segmentTransform(a * 0.9f + Vec3(0.0f, 0.3f, 0.0f), c, 0.06f));
+        }
+    addBox(out.mesh, Vec3(0.0f, waistY, 0.0f), Vec3(waistHalf + 0.1f, 0.25f, waistHalf + 0.1f), steel);
+    Mesh mast = makeCylinder(0.55f, 0.35f, height - waistY, 4, false, true, steel);
+    appendMesh(out.mesh, mast, Mat4::translation(Vec3(0.0f, waistY, 0.0f)));
+    for (int k = 0; k < 2; ++k) {
+        const float y = waistY + (height - waistY) * (0.45f + 0.4f * k);
+        const float half = 4.2f - k * 1.0f;
+        addBox(out.mesh, Vec3(0.0f, y, 0.0f), Vec3(half, 0.14f, 0.14f), steel);
+        for (int sx = -1; sx <= 1; sx += 2)
+            addBox(out.mesh, Vec3(sx * (half - 0.4f), y - 0.55f, 0.0f), Vec3(0.12f, 0.45f, 0.12f),
+                   Vec3(0.55f, 0.58f, 0.62f));
+    }
+    (void)rng;
+    out.mesh.computeBounds();
+    out.height = height;
+    out.radius = baseHalf + 0.5f;
+    out.obstacles.push_back(box(Vec3(0.0f, height * 0.5f, 0.0f), Vec3(0.9f, height * 0.5f, 0.9f),
+                                ObstacleKind::Pillar, false));
+    return out;
+}
 
 StructurePiece buildCauseway(float halfLen, float halfWid, float height,
                              uint32_t seed, const Vec3& tint) {
