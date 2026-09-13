@@ -463,9 +463,13 @@ void AudioEngine::renderMusic(float dt) {
         case 1:  stepTime = 0.150f - 0.018f * intensity_; break;   // breakbeat
         case 2:  stepTime = 0.290f - 0.070f * intensity_; break;   // ambient
         case 3:  stepTime = 0.215f - 0.035f * intensity_; break;   // orchestral
+        case 4:  stepTime = 0.165f - 0.020f * intensity_; break;   // industrial
+        case 5:  stepTime = 0.132f - 0.010f * intensity_; break;   // drum and bass
+        case 6:  stepTime = 0.300f - 0.045f * intensity_; break;   // noir
+        case 7:  stepTime = 0.360f; break;                          // hangar
         default: stepTime = 0.190f - 0.030f * intensity_; break;   // darksynth
     }
-    if (boss_) stepTime *= 0.88f;
+    if (boss_ && style_ != 7) stepTime *= 0.88f;
 
     // Tempo-safe step clock. The old code divided an ABSOLUTE clock by the
     // CURRENT step length; with tempo following intensity, every swell or
@@ -576,7 +580,7 @@ void AudioEngine::renderMusic(float dt) {
 
     // Chord degrees in A minor: {root semitone, major third?}.
     struct Chord { int root; bool major; };
-    static const Chord kMainProg[4][8] = {
+    static const Chord kMainProg[8][8] = {
         // darksynth: brooding i-VI-VII vamp with a III turn
         {{0,false},{0,false},{8,true},{10,true},{0,false},{0,false},{3,true},{10,true}},
         // breakbeat: driving i-VII-VI-VII, minor v on the turn
@@ -585,14 +589,26 @@ void AudioEngine::renderMusic(float dt) {
         {{0,false},{0,false},{8,true},{8,true},{3,true},{3,true},{10,true},{10,true}},
         // orchestral: harmonic-minor drama, i-VI-iv-V
         {{0,false},{8,true},{5,false},{7,true},{0,false},{8,true},{3,true},{7,true}},
+        // industrial: a pedal i with a flat-II shove and a tritone turn
+        {{0,false},{0,false},{1,true},{0,false},{0,false},{0,false},{6,true},{1,true}},
+        // drum and bass: i-VI-III-VII, the rolling one
+        {{0,false},{0,false},{8,true},{8,true},{3,true},{3,true},{10,true},{10,true}},
+        // noir: i-iv-VI-V, the smoky one, two bars a chord
+        {{0,false},{0,false},{5,false},{5,false},{8,true},{8,true},{7,true},{7,true}},
+        // hangar: a bare i and VI, drifting
+        {{0,false},{0,false},{0,false},{0,false},{8,true},{8,true},{8,true},{8,true}},
     };
-    static const Chord kLiftProg[4][8] = {
+    static const Chord kLiftProg[8][8] = {
         {{5,false},{5,false},{8,true},{10,true},{0,false},{10,true},{8,true},{7,true}},
         {{5,false},{3,true},{8,true},{7,true},{5,false},{3,true},{10,true},{7,true}},
         {{5,false},{5,false},{8,true},{8,true},{0,false},{0,false},{7,true},{7,true}},
         {{5,false},{0,false},{8,true},{10,true},{0,false},{7,true},{0,false},{7,true}},
+        {{5,false},{5,false},{6,true},{6,true},{0,false},{0,false},{1,true},{10,true}},
+        {{5,false},{5,false},{3,true},{3,true},{8,true},{8,true},{10,true},{7,true}},
+        {{5,false},{5,false},{10,true},{10,true},{8,true},{8,true},{7,true},{7,true}},
+        {{5,false},{5,false},{5,false},{5,false},{3,true},{3,true},{3,true},{3,true}},
     };
-    const int styleRow = (style_ >= 0 && style_ < 4) ? style_ : 0;
+    const int styleRow = (style_ >= 0 && style_ < 8) ? style_ : 0;
     // The RISE walks i - III - iv - V, two bars a chord: the most literal
     // ascent to the dominant there is, resolving hard into the LIFT.
     static const Chord kRiseProg[8] = {
@@ -613,17 +629,25 @@ void AudioEngine::renderMusic(float dt) {
     // an answer, per style. Degrees index the A natural minor scale and are
     // transposed onto the current chord root so the line follows the harmony.
     static const int kMinor[7] = {0, 2, 3, 5, 7, 8, 10};
-    static const int kCall[4][16] = {
+    static const int kCall[8][16] = {
         {4,-1,3,-1, 2,-1,4,5, 4,-1,3,2, 4,-1,5,6},          // darksynth
         {0,2,-1,4, 2,-1,5,4, 0,2,4,5, 6,5,4,2},             // breakbeat
         {-1,-1,4,-1, -1,3,-1,-1, 4,-1,5,-1, 3,-1,-1,-1},    // ambient
         {0,-1,2,3, 4,-1,3,2, 4,5,-1,4, 3,-1,2,-1},          // orchestral
+        {0,0,-1,0, 3,-1,0,0, -1,0,4,-1, 3,0,-1,1},          // industrial: hammered
+        {4,-1,-1,5, -1,4,-1,-1, 2,-1,4,-1, -1,5,-1,6},      // dnb: stabs off the beat
+        {-1,4,-1,-1, 3,-1,-1,2, -1,-1,4,-1, -1,5,-1,-1},    // noir: late, lazy
+        {4,-1,-1,-1, -1,-1,2,-1, -1,-1,-1,-1, 3,-1,-1,-1},  // hangar: three notes a bar
     };
-    static const int kAnswer[4][16] = {
+    static const int kAnswer[8][16] = {
         {2,-1,1,-1, 0,-1,2,3, 2,-1,1,0, 2,1,0,-1},
         {4,5,-1,6, 5,4,2,-1, 2,4,0,2, 4,-1,2,0},
         {5,-1,-1,4, -1,-1,3,-1, 4,-1,2,-1, 0,-1,-1,-1},
         {5,-1,4,3, 4,-1,3,2, 2,3,1,2, 0,-1,-1,-1},
+        {2,2,-1,2, 1,-1,2,2, -1,2,0,-1, 1,2,-1,0},
+        {2,-1,-1,4, -1,2,-1,-1, 0,-1,2,-1, -1,1,-1,0},
+        {-1,2,-1,-1, 1,-1,-1,0, -1,-1,2,-1, -1,1,-1,-1},
+        {2,-1,-1,-1, -1,-1,0,-1, -1,-1,-1,-1, 1,-1,-1,-1},
     };
     // The RISE motif: one climbing figure for every style, sequenced up the
     // scale bar over bar so the line itself ratchets.
@@ -661,7 +685,7 @@ void AudioEngine::renderMusic(float dt) {
     // rhythm section - a four-on-the-floor kick and driving hats - and every
     // layer above it scales with the fight. Calm is thin and wide; combat is
     // a wall. The CONTRAST is the drama.
-    const bool grooveOn = !intro && style_ != 2;
+    const bool grooveOn = !intro && style_ != 2 && style_ != 7;
     float energy = clampf(in2 + riseT * 0.6f + (lift ? 0.35f : 0.0f),
                           0.0f, 1.3f);
     // Everything above the rhythm section scales with energy, so pulling it
@@ -899,13 +923,176 @@ void AudioEngine::renderMusic(float dt) {
                 voice(Wave::Saw, hz(cRoot - 12 + 7), 0.07f, 3.2f, 0.10f);
             break;
         }
+        // ------------------------------------------- 4: industrial / EBM ---
+        // A press line: a sixteenth-note distorted bass sequencer that never
+        // stops, a four-to-the-floor kick with a HALF-TIME snare on three,
+        // metal on every sixteenth once the fight is on, anvil rings on the
+        // offbeats and shouted tritone stabs. Ugly on purpose.
+        case 4: {
+            const bool kick = grooveOn && (inBar % 4 == 0 ||
+                              (energy > 0.45f && (inBar == 7 || inBar == 14)));
+            if (kick) sweep(Wave::Sine, 135.0f, 40.0f, 0.34f, 0.12f, 1.0f);
+            if (grooveOn && (inBar == 8 || (energy > 0.5f && inBar == 12))) {
+                voice(Wave::Noise, 1.0f, 0.17f, 0.12f, 0.45f);
+                sweep(Wave::Sine, 190.0f, 120.0f, 0.12f, 0.06f, 1.0f);
+            }
+            // The sequencer. Two squares a hair apart read as distortion.
+            static const int kSeq[16] = {0,0,12,0, 0,7,0,10, 0,0,12,0, 6,0,7,0};
+            if (!intro) {
+                const int semis = cRoot + kSeq[inBar];
+                const float lp = 0.22f + 0.45f * energy;
+                voice(Wave::Square, hz(semis), 0.13f + 0.04f * energy, 0.07f, lp,
+                      (inBar & 1) ? 0.15f : -0.15f);
+                voice(Wave::Square, hz(semis) * 1.009f, 0.09f, 0.07f, lp,
+                      (inBar & 1) ? -0.15f : 0.15f);
+            }
+            // Metal: a short bright noise tick every sixteenth, accented on
+            // the offbeats, and an anvil ring on 6 and 14.
+            if (grooveOn && energy > 0.15f)
+                voice(Wave::Noise, 1.0f, ((inBar & 1) ? 0.038f : 0.018f) * std::min(1.0f, energy + 0.4f),
+                      0.012f, 0.98f, (inBar & 2) ? 0.35f : -0.35f);
+            if (grooveOn && (inBar == 6 || inBar == 14))
+                voice(Wave::Square, hz(cRoot + 43), 0.030f + 0.02f * energy, 0.16f, 0.9f,
+                      (inBar == 6) ? -0.5f : 0.5f);
+            // Stabs: the shout. Fifth at rest, tritone under fire.
+            if (!intro && (inBar == 0 || inBar == 11)) {
+                const int top = (energy > 0.5f) ? cRoot + 18 : cFifth + 12;
+                voice(Wave::Saw, hz(cRoot + 12), 0.11f + 0.04f * energy, 0.12f, 0.45f, -0.3f);
+                voice(Wave::Saw, hz(top), 0.09f + 0.04f * energy, 0.12f, 0.45f, 0.3f);
+            }
+            if (melodyOn && mdeg >= 0) {
+                voice(Wave::Square, hz(cRoot + kMinor[mdeg] + melOct),
+                      0.085f + 0.04f * in2, 0.11f, 0.5f + 0.3f * in2,
+                      (bar & 1) ? 0.25f : -0.25f);
+                voice(Wave::Square, hz(cRoot + kMinor[mdeg] + melOct + 12),
+                      0.030f, 0.09f, 0.6f, (bar & 1) ? -0.15f : 0.15f);
+            }
+            // A sheet-metal riser into every turn.
+            if (fillBar && inBar >= 12)
+                sweep(Wave::Noise, 1.0f, 1.0f, 0.045f + 0.02f * (inBar - 12), 0.08f,
+                      0.5f + 0.12f * (inBar - 12));
+            break;
+        }
+        // ------------------------------------------- 5: drum and bass ------
+        // Two-step at a hundred and seventy: kick on the one and the and-of-
+        // three, snare on two and four, hats every sixteenth, a REESE bass -
+        // two detuned saws beating against each other - under it all, with a
+        // sub sine holding the floor. Pads in the calm, stabs in the fight.
+        case 5: {
+            if (grooveOn && (inBar == 0 || inBar == 10))
+                sweep(Wave::Sine, 120.0f, 46.0f, 0.30f, 0.11f, 1.0f);
+            if (grooveOn && (inBar == 4 || inBar == 12)) {
+                voice(Wave::Noise, 1.0f, 0.16f, 0.10f, 0.6f);
+                sweep(Wave::Triangle, 210.0f, 170.0f, 0.09f, 0.05f, 1.0f);
+            }
+            if (grooveOn && energy > 0.3f && (inBar == 7 || inBar == 15))
+                voice(Wave::Noise, 1.0f, 0.045f, 0.045f, 0.6f, (inBar == 7) ? 0.3f : -0.3f);
+            if (grooveOn)
+                voice(Wave::Noise, 1.0f, ((inBar & 1) ? 0.034f : 0.018f) + 0.015f * energy,
+                      0.018f, 0.96f, (inBar & 2) ? 0.3f : -0.3f);
+            if (grooveOn && inBar == 2)
+                voice(Wave::Noise, 1.0f, 0.05f, 0.09f, 0.85f);
+            // The reese: re-fed on the one and the and-of-two, riding the
+            // filter with the fight.
+            if (!intro && (inBar == 0 || inBar == 8)) {
+                const float lp = 0.16f + 0.32f * energy;
+                voice(Wave::Saw, hz(cRoot - 12), 0.14f + 0.04f * energy, 0.55f, lp, -0.2f);
+                voice(Wave::Saw, hz(cRoot - 12) * 1.008f, 0.12f, 0.55f, lp, 0.2f);
+                voice(Wave::Sine, hz(cRoot - 24), 0.22f, 0.8f, 1.0f);
+            }
+            // Pads while it is calm; they thin out as the fight heats.
+            if (inBar == 0 && energy < 0.7f) {
+                const float pa = 0.045f * (1.0f - energy * 0.8f);
+                voice(Wave::Triangle, hz(cThird + 12), pa, 3.0f, 0.15f, -0.4f);
+                voice(Wave::Triangle, hz(cFifth + 12), pa, 3.0f, 0.15f, 0.4f);
+            }
+            if (melodyOn && mdeg >= 0) {
+                voice(Wave::Saw, hz(cRoot + kMinor[mdeg] + melOct),
+                      0.08f + 0.04f * in2, 0.14f, 0.55f + 0.2f * in2,
+                      (inBar % 16 < 8) ? -0.35f : 0.35f);
+                if (harmonyOn)
+                    voice(Wave::Saw, hz(cRoot + kMinor[mdeg - 2] + melOct),
+                          0.045f, 0.13f, 0.5f, (inBar % 16 < 8) ? 0.3f : -0.3f);
+            }
+            // The break: snare rolls through the last four steps of a turn.
+            if (fillBar && inBar >= 12)
+                voice(Wave::Noise, 1.0f, 0.06f + 0.025f * (inBar - 12), 0.04f, 0.65f,
+                      (inBar & 1) ? 0.3f : -0.3f);
+            break;
+        }
+        // ----------------------------------------------- 6: noir -----------
+        // Trip-hop at a crawl: a dusty boom-bap kick, a fat snare on two and
+        // four, vinyl crackle under everything, a walking bass in quarter
+        // notes, electric-piano minor sevenths and a lead that arrives late
+        // and lingers. Strings creep in for the LIFT.
+        case 6: {
+            if (grooveOn && (inBar == 0 || inBar == 7 || inBar == 10))
+                sweep(Wave::Sine, 92.0f, 44.0f, 0.30f, 0.20f, 1.0f);
+            if (grooveOn && (inBar == 4 || inBar == 12)) {
+                voice(Wave::Noise, 1.0f, 0.14f, 0.13f, 0.40f);
+                sweep(Wave::Sine, 175.0f, 150.0f, 0.10f, 0.06f, 1.0f);
+            }
+            // Crackle: a tick a step, never the same place twice.
+            voice(Wave::Noise, 1.0f, 0.009f + 0.004f * in2, 0.025f, 0.6f,
+                  ((step * 7) % 5) * 0.2f - 0.4f);
+            if (grooveOn && inBar % 4 == 2)
+                voice(Wave::Noise, 1.0f, 0.030f, 0.030f, 0.9f, (inBar & 4) ? 0.3f : -0.3f);
+            if (grooveOn && energy > 0.4f && (inBar & 1))
+                voice(Wave::Noise, 1.0f, 0.018f, 0.020f, 0.85f, (inBar & 2) ? 0.4f : -0.4f);
+            // Walking bass in quarters.
+            static const int kWalk[4] = {0, 7, 10, 7};
+            if (!intro && inBar % 4 == 0)
+                voice(Wave::Triangle, hz(cRoot - 12 + kWalk[inBar / 4]), 0.21f + 0.03f * energy,
+                      0.45f, 0.15f);
+            // Electric piano: a minor seventh on the one and a push on the
+            // and-of-two, a sine bell doubling the top.
+            if (!intro && (inBar == 0 || inBar == 6)) {
+                const float pa = (inBar == 0) ? 0.06f : 0.045f;
+                voice(Wave::Triangle, hz(cRoot + 12), pa, 1.4f, 0.30f, -0.2f);
+                voice(Wave::Triangle, hz(cThird + 12), pa, 1.4f, 0.30f, 0.2f);
+                voice(Wave::Triangle, hz(cFifth + 12), pa * 0.8f, 1.4f, 0.30f, -0.1f);
+                voice(Wave::Triangle, hz(cRoot + 22), pa * 0.7f, 1.4f, 0.30f, 0.3f);
+                voice(Wave::Sine, hz(cRoot + 34), 0.020f, 1.2f, 1.0f);
+            }
+            if (melodyOn && mdeg >= 0) {
+                voice(Wave::Triangle, hz(cRoot + kMinor[mdeg] + melOct),
+                      0.07f + 0.03f * in2, 0.9f, 0.35f, (bar & 1) ? 0.3f : -0.3f);
+                voice(Wave::Sine, hz(cRoot + kMinor[mdeg] + melOct + 12),
+                      0.022f, 1.1f, 0.6f, (bar & 1) ? -0.2f : 0.2f);
+            }
+            // Strings for the payoff.
+            if ((lift || rise) && inBar == 0) {
+                voice(Wave::Saw, hz(cRoot + 12), 0.035f + 0.02f * energy, 3.0f, 0.12f, -0.4f);
+                voice(Wave::Saw, hz(cFifth + 12), 0.030f, 3.0f, 0.12f, 0.4f);
+            }
+            break;
+        }
+        // ----------------------------------------------- 7: hangar ---------
+        // The workshop. No drums, no fight: a low drone re-fed every bar, a
+        // fifth floating over it, three piano notes a bar and a slow wash of
+        // air. Something to think over a loadout to.
+        case 7: {
+            if (inBar == 0) {
+                voice(Wave::Saw, hz(cRoot - 12), 0.14f, 3.6f, 0.08f);
+                voice(Wave::Triangle, hz(cFifth), 0.07f, 3.6f, 0.12f, 0.3f);
+                voice(Wave::Noise, 1.0f, 0.016f, 2.5f, 0.12f, -0.3f);
+            }
+            if (mdeg >= 0 && (bar & 1) == 0) {
+                voice(Wave::Triangle, hz(cRoot + kMinor[mdeg] + 24), 0.085f, 2.0f, 0.35f,
+                      (inBar < 8) ? -0.25f : 0.25f);
+                voice(Wave::Sine, hz(cRoot + kMinor[mdeg] + 36), 0.018f, 1.6f, 1.0f);
+            } else if (cdeg >= 0 && inBar % 8 == 4) {
+                voice(Wave::Triangle, hz(cRoot + kMinor[cdeg] + 12), 0.06f, 2.2f, 0.3f);
+            }
+            break;
+        }
     }
 
     // ------------------------------------------- shared tension hardware --
     // Whatever the style, the RISE closes its hats up, leans on the snare,
     // and runs a riser through its last two bars; the LIFT lands on a crash
     // and a sub drop. This is the release the eight bars were buying.
-    if (rise) {
+    if (rise && style_ != 7) {
         if (inBar % 2 == 0 || riseT > 0.5f)
             voice(Wave::Noise, 1.0f, 0.020f + 0.035f * riseT, 0.022f, 0.9f,
                   (inBar & 2) ? 0.3f : -0.3f);
@@ -920,7 +1107,7 @@ void AudioEngine::renderMusic(float dt) {
                       hz(cRoot + 24), 0.035f, 0.30f, 0.5f);
         }
     }
-    if (drop) {
+    if (drop && style_ != 7) {
         layerGain = 1.0f;
         // What is LEFT in a breakdown is as composed as what is taken out: a
         // sub pulse on the half-bar, a rimshot tick keeping the clock, and a
@@ -942,11 +1129,11 @@ void AudioEngine::renderMusic(float dt) {
     // Coming OUT of the breakdown. A four-bar hole in the arrangement needs a
     // door back in or the groove just reappears, and a groove that reappears
     // sounds like a mistake rather than a return.
-    if (!boss_ && bar == 16 && inBar == 0) {
+    if (!boss_ && style_ != 7 && bar == 16 && inBar == 0) {
         voice(Wave::Noise, 1.0f, 0.13f, 0.45f, 0.5f);
         sweep(Wave::Sine, hz(cRoot + 12), hz(cRoot) * 0.5f, 0.24f, 0.35f, 1.0f);
     }
-    if (!boss_ && bar == 24 && inBar == 0) {
+    if (!boss_ && style_ != 7 && bar == 24 && inBar == 0) {
         voice(Wave::Noise, 1.0f, 0.16f, 0.60f, 0.45f);
         sweep(Wave::Sine, 100.0f, 30.0f, 0.30f, 0.5f, 1.0f);
     }

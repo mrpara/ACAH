@@ -16,6 +16,11 @@ namespace sb {
 
 struct StructurePiece {
     Mesh mesh;
+    // A far-field stand-in: the same silhouette as a handful of boxes. Empty
+    // for pieces that are culled by distance anyway. Ruins carry one; at a
+    // hundred metres a tower's window bays are a few hundred triangles of
+    // nothing the character grid can show.
+    Mesh lod;
     std::vector<Obstacle> obstacles;   // local space, base at y = 0
     float height = 0.0f;
     float radius = 0.0f;               // footprint radius for scattering

@@ -23,6 +23,10 @@ const Vec3 kFrameLit(0.056f, 0.059f, 0.062f);
 const Vec3 kConsole(0.046f, 0.049f, 0.049f);
 const Vec3 kBezel(0.026f, 0.029f, 0.029f);
 const Vec3 kGlassRim(0.072f, 0.078f, 0.080f);
+// An instrument screen: darker than the panelling around it, so a face with
+// nothing on it still reads as a screen, and the readout painted over it by
+// the HUD pass has something to sit against.
+const Vec3 kScreen(0.021f, 0.026f, 0.024f);
 
 struct Painter {
     Rasterizer& raster;
@@ -84,6 +88,69 @@ struct Painter {
         box(at, Vec3(size * 1.3f, size * 0.5f, size * 1.3f), kBezel, 0.15f);
         box(at + Vec3(0.0f, 0.008f, 0.0f), Vec3(size, size * 0.6f, size), lit, emissive);
     }
+    // An instrument face: a dark screen sunk into the panelling behind a lit
+    // bezel, with a bracket above and below so it reads as a fitted unit
+    // rather than a hole. The HUD pass paints the readout over the screen.
+    void screen(const CabinPanel& p, const Vec3& rim, float thick) {
+        const Mat4 tilt = Mat4::rotationX(-p.tilt);
+        const Vec3 u = p.up();
+        // Bezel: a frame of four bars around the face, so the screen's own
+        // dark rectangle is never outlined by a bigger dark rectangle.
+        const float bw = thick, bh = thick * 0.8f;
+        box(p.centre + u * (p.halfH + bh) + Vec3(0.0f, 0.0f, 0.004f),
+            Vec3(p.halfW + bw * 2.0f, bh, 0.006f), rim, 1.0f, tilt);
+        box(p.centre - u * (p.halfH + bh) + Vec3(0.0f, 0.0f, 0.004f),
+            Vec3(p.halfW + bw * 2.0f, bh, 0.006f), rim, 1.0f, tilt);
+        for (int s = -1; s <= 1; s += 2)
+            box(p.centre + Vec3(static_cast<float>(s) * (p.halfW + bw), 0.0f, 0.004f),
+                Vec3(bw, p.halfH + bh * 2.0f, 0.006f), rim * 0.8f, 1.0f, tilt);
+        // The screen itself: darker than the panelling it sits in.
+        box(p.centre + Vec3(0.0f, 0.0f, 0.008f), Vec3(p.halfW, p.halfH, 0.004f),
+            kScreen, 1.0f, tilt);
+    }
+
+    // ---- instruments mounted ON a panel ----------------------------------
+    // All three take face coordinates (u, v in -1..1), so the text pass can
+    // put a label at the same coordinates and know it will land on it.
+
+    // A raised plate: what a label is etched into. Slightly proud of the
+    // screen and a shade lighter, so the lettering reads as engraved metal
+    // rather than as something printed on the glass.
+    void plate(const CabinPanel& p, float u0, float u1, float v, float vh,
+               const Vec3& colour) {
+        const Mat4 tilt = Mat4::rotationX(-p.tilt);
+        const Vec3 c = p.at((u0 + u1) * 0.5f, v);
+        box(c, Vec3(std::fabs(u1 - u0) * 0.5f * p.halfW, vh * p.halfH, 0.004f),
+            colour, 1.0f, tilt);
+    }
+
+    // A lit gauge lying on the face: a sunk track with a lit bar filling it.
+    // This is the instrument itself - geometry, not characters - so it
+    // brightens and colours with what it is measuring.
+    void gauge(const CabinPanel& p, float u0, float u1, float v, float frac,
+               const Vec3& lit, float vh) {
+        const Mat4 tilt = Mat4::rotationX(-p.tilt);
+        const float halfU = std::fabs(u1 - u0) * 0.5f;
+        box(p.at((u0 + u1) * 0.5f, v), Vec3(halfU * p.halfW + 0.004f, vh * p.halfH, 0.003f),
+            kBezel * 1.5f, 0.9f, tilt);
+        const float f = clampf(frac, 0.0f, 1.0f);
+        if (f > 0.012f) {
+            const float uEnd = u0 + (u1 - u0) * f;
+            box(p.at((u0 + uEnd) * 0.5f, v) - Vec3(0.0f, 0.0f, 0.004f),
+                Vec3(std::fabs(uEnd - u0) * 0.5f * p.halfW, vh * p.halfH * 0.74f, 0.003f),
+                lit, 1.0f, tilt);
+        }
+    }
+
+    // An annunciator on the face: a lit pip in a dark surround.
+    void pip(const CabinPanel& p, float u, float v, const Vec3& lit, float emissive,
+             float size) {
+        const Mat4 tilt = Mat4::rotationX(-p.tilt);
+        const Vec3 c = p.at(u, v);
+        box(c, Vec3(size * 1.5f * p.halfW, size * 2.2f * p.halfH, 0.003f), kBezel, 0.5f, tilt);
+        box(c - Vec3(0.0f, 0.0f, 0.004f),
+            Vec3(size * p.halfW, size * 1.5f * p.halfH, 0.003f), lit, emissive, tilt);
+    }
 };
 
 Vec3 gaugeColour(float frac, const Vec3& good, const Vec3& warn, const Vec3& bad) {
@@ -105,55 +172,54 @@ CabinLayout cabinLayoutFor(const Loadout& loadout) {
     switch (family) {
         case HullFamily::Turreted:
             // An enclosed crew compartment with a vision slot: pillars fairly
-            // close, a low roof, a full console.
-            lay.pillarXf = 0.84f;
-            lay.roofY = 0.56f;
-            lay.dashYf = -0.74f;
+            // close, a deep brow of panelling, a full console.
+            lay.pillarXf = 0.96f;
+            lay.roofYf = 0.780f;
+            lay.dashYf = -0.34f;
             break;
         case HullFamily::Casemate:
             // The gun lives in here with you. Wide, low glass over the
             // mantlet, the breech filling the right of the cabin.
-            lay.pillarXf = 0.92f;
-            lay.roofY = 0.50f;
-            lay.dashYf = -0.70f;
+            lay.pillarXf = 1.00f;
+            lay.roofYf = 0.770f;
+            lay.dashYf = -0.32f;
             lay.breech = true;
             break;
         case HullFamily::LowProfile:
             // A flat hull has no headroom and needs none: a wide bubble on
             // thin struts, the console a shelf at your knees.
-            lay.pillarXf = 0.97f;
+            lay.pillarXf = 1.05f;
             lay.pillarR = 0.032f;
-            lay.roofY = 0.66f;
-            lay.dashYf = -0.80f;
+            lay.roofYf = 0.790f;
+            lay.dashYf = -0.38f;
             lay.dashZ = 0.90f;
             lay.bubble = true;
             break;
         case HullFamily::Artillery:
             // An open cradle: rails, no roof, hydraulic columns at the far
-            // sides, a periscope frame overhead.
-            lay.pillarXf = 0.94f;
+            // sides, and the two brow screens hung off a roll frame.
+            lay.pillarXf = 1.01f;
             lay.pillarR = 0.07f;
-            lay.roofY = 0.80f;
-            lay.dashYf = -0.74f;
+            lay.roofYf = 0.785f;
+            lay.dashYf = -0.36f;
             lay.openTop = true;
             break;
     }
     switch (style) {
         case 0: lay.roundPillars = true; break;             // pod: tubular frame
         case 2: lay.rake = 0.28f; break;                    // dart: raked glass
-        case 3: lay.pillarXf *= 0.88f; lay.roofY += 0.08f; break;  // torso: tall, narrow
-        case 4: lay.mullion = true; lay.pillarR *= 1.4f; break;    // long hull: heavy
+        case 3: lay.pillarXf *= 0.88f; lay.roofYf += 0.01f; break;  // torso: tall, narrow
+        case 4: lay.mullion = true; lay.pillarR *= 1.4f; break;     // long hull: heavy
         default: break;
     }
     if (armour) lay.plate = 0.85f + 0.22f * static_cast<float>(armour->tier);
     lay.sensorTier = sensor ? sensor->tier : 0;
     lay.pillarR *= lay.plate;
     if (lay.breech) {
-        // The breech takes the right of the console: the gun group moves in.
-        lay.gunU = -0.02f;
-        lay.objU = 0.30f;
-        lay.threatU = -0.20f;
-        lay.scopeU = -0.50f;
+        // The breech takes the right of the cabin, so the console's three
+        // screens all shift left and the gun panel loses a little width.
+        lay.cutL = -0.44f;
+        lay.cutR = -0.02f;
     }
     return lay;
 }
@@ -161,23 +227,62 @@ CabinLayout cabinLayoutFor(const Loadout& loadout) {
 void CabinLayout::resolve(const Camera& cam) {
     const float tanHalf = std::tan(cam.fovY * 0.5f);
     auto halfW = [&](float z) { return tanHalf * cam.aspect * z; };
+    auto halfH = [&](float z) { return tanHalf * z; };
     pillarX = pillarXf * halfW(1.0f);
     dashHalfW = dashHalfWf * halfW(dashZ);
-    const float dz = dashZ - 0.06f;
-    const float hw = halfW(dz);
-    dashY = dashYf * tanHalf * dz;
-    barLen = barLenF * hw;
-    lampPitch = lampPitchF * hw;
-    const float y = dashY + 0.02f;
-    hullBar = Vec3(hullU * hw, y, dz);
-    heatBar = Vec3(hullU * hw, y, dz - 0.07f);
-    abilityLamps = Vec3(hullU * hw + lampPitch * 0.5f, y, dz - 0.15f);
-    gunLamps = Vec3(gunU * hw + lampPitch * 0.5f, y, dz);
-    jumpBar = Vec3(gunU * hw, y, dz - 0.07f);
-    objectiveText = Vec3(objU * hw, y, dz);
-    threatLamp = Vec3(threatU * hw, y, dz + 0.04f);
-    scopeSize = (0.070f + 0.012f * static_cast<float>(sensorTier)) * hw;
-    scope = Vec3(scopeU * hw, dashY + 0.01f, dz - 0.10f);
+    // The brow's underside and the console's top surface are quoted as
+    // fractions of the half-height AT THEIR OWN DEPTH, so the cockpit frames
+    // the same share of the view at any window aspect.
+    roofY = roofYf * halfH(1.0f);
+    dashY = panelTop * halfH(panelZ);
+    (void)dashYf;
+
+    // A screen spanning a range of screen fractions at one depth. `u` runs
+    // across the view, `v` up it; both are fractions of the half-extent at
+    // that depth, so the panel lands where the pilot sees it regardless of
+    // how wide the window is. The bezel is taken out of the face itself.
+    auto face = [&](float z, float u0, float u1, float v0, float v1, float tilt) {
+        const float hw = halfW(z), hh = halfH(z);
+        CabinPanel p;
+        p.centre = Vec3((u0 + u1) * 0.5f * hw, (v0 + v1) * 0.5f * hh, z);
+        // The bezel is taken out of the face proportionally: a fixed inset
+        // is a rounding error on a big panel and a whole row of text on a
+        // shallow one, and the brow is shallow on every light hull.
+        const float halfU = (u1 - u0) * 0.5f * hw, halfV = (v1 - v0) * 0.5f * hh;
+        p.halfW = std::max(0.01f, halfU - std::min(0.012f, halfU * 0.035f));
+        p.halfH = std::max(0.01f, halfV - std::min(0.010f, halfV * 0.035f));
+        p.tilt = tilt;
+        return p;
+    };
+
+    // ---- the brow ---------------------------------------------------------
+    // Two screens under the roof panelling, tipped down toward the pilot.
+    // The band runs off the top of the view so the panelling has no edge.
+    // The FACE stops at the top of the view even though the panelling behind
+    // it runs off: every line of lamps the brow carries has to be somewhere
+    // the pilot can see, and a face that ran to 1.34 put two thirds of its
+    // own height above the glass.
+    {
+        const float v0 = roofYf + 0.008f;
+        const float v1 = 1.02f;
+        browL = face(browZ, -0.985f, browSplit - browGap, v0, v1, -0.22f);
+        browR = face(browZ, browSplit + browGap, 0.985f, v0, v1, -0.22f);
+    }
+
+    // ---- the console ------------------------------------------------------
+    // Three screens in a near-vertical instrument face. The face starts at
+    // panelTop, which IS the bottom of the windscreen: a deep shelf would
+    // rise up the view as it receded and cost the pilot the ground they are
+    // walking onto, so the console is a wall of instruments instead.
+    {
+        const float v0 = panelBot, v1 = panelTop;
+        dashL = face(panelZ, -0.985f, cutL - panelGap, v0, v1, 0.12f);
+        // The radar sits a little lower than its neighbours: the strip of
+        // console above it carries the caution lamps, which have to be
+        // somewhere the radar's own picture will not paint over them.
+        dashC = face(panelZ, cutL + panelGap, cutR - panelGap, v0, v1 - 0.075f, 0.12f);
+        dashR = face(panelZ, cutR + panelGap, breech ? 0.72f : 0.985f, v0, v1, 0.12f);
+    }
 }
 
 CabinState cabinStateFor(const Mech& p, float time, bool threat, bool jammed) {
@@ -196,18 +301,23 @@ CabinState cabinStateFor(const Mech& p, float time, bool threat, bool jammed) {
         st.abilityEngaged[i] = p.abilityEngaged(i);
         st.abilityCool[i] = p.abilityCooldownFraction(i);
     }
+    // Only mounts that carry something get a lamp. An empty hardpoint is a
+    // workshop problem, not a cockpit one, and a row of dashes in the middle
+    // of the gun panel is exactly the clutter the console is meant to avoid.
     const std::vector<MountedWeapon>& ws = p.weapons();
-    st.gunCount = static_cast<int>(std::min<size_t>(ws.size(), 6));
-    for (int i = 0; i < st.gunCount; ++i) {
-        const MountedWeapon& w = ws[static_cast<size_t>(i)];
-        if (!w.part) { st.gunEnabled[i] = false; st.gunEmpty[i] = true; continue; }
+    int g = 0;
+    for (size_t i = 0; i < ws.size() && g < 6; ++i) {
+        const MountedWeapon& w = ws[i];
+        if (!w.part) continue;
         const WeaponDef& def = w.part->weapon;
-        st.gunEnabled[i] = w.enabled;
-        st.gunEmpty[i] = def.ammo == AmmoKind::Limited && w.rounds == 0 && w.reserve == 0;
-        st.gunReady[i] = w.enabled && w.cooldown <= 0.01f &&
+        st.gunEnabled[g] = w.enabled;
+        st.gunEmpty[g] = def.ammo == AmmoKind::Limited && w.rounds == 0 && w.reserve == 0;
+        st.gunReady[g] = w.enabled && w.cooldown <= 0.01f &&
                          (def.ammo != AmmoKind::Limited || w.rounds > 0);
-        st.gunHeat[i] = (def.spinUp > 0.0f) ? w.spool : clampf(w.bloom / 2.2f, 0.0f, 1.0f);
+        st.gunHeat[g] = (def.spinUp > 0.0f) ? w.spool : clampf(w.bloom / 2.2f, 0.0f, 1.0f);
+        ++g;
     }
+    st.gunCount = g;
     st.threat = threat;
     st.jammed = jammed;
     st.climbing = p.climbFraction() > 0.05f;
@@ -249,27 +359,52 @@ void submitCabin(Rasterizer& raster, const Camera& cam, const CabinLayout& layIn
                   Vec3(pr * 0.12f, len * 0.5f, pr * 0.8f), kGlassRim, 0.0f,
                   Mat4::basis(xAxis, y, z));
         }
-        // Side walls / door frames, back beside the seat.
+        // Side walls / door frames, back beside the seat. They sit BEHIND
+        // the pillar plane: a wall that reaches forward of it sweeps in
+        // across the glass as it approaches the camera and quietly costs the
+        // pilot the outer sixth of the view on each side.
         if (!lay.bubble) {
-            P.box(Vec3(x + static_cast<float>(side) * (pr + 0.10f), (top + bottom) * 0.5f, zP - 0.45f),
-                  Vec3(0.07f, (top - bottom) * 0.5f, 0.55f), kFrame * 0.9f);
+            P.box(Vec3(x + static_cast<float>(side) * (pr + 0.06f), (top + bottom) * 0.5f, zP - 0.30f),
+                  Vec3(0.05f, (top - bottom) * 0.5f, 0.42f), kFrame * 0.9f);
         } else {
             // A bubble has a low sill and glass above it.
-            P.box(Vec3(x + static_cast<float>(side) * (pr + 0.10f), bottom + 0.08f, zP - 0.45f),
-                  Vec3(0.07f, 0.10f, 0.55f), kFrame * 0.9f);
+            P.box(Vec3(x + static_cast<float>(side) * (pr + 0.06f), bottom + 0.08f, zP - 0.30f),
+                  Vec3(0.05f, 0.10f, 0.42f), kFrame * 0.9f);
         }
     }
 
-    // ---- roof --------------------------------------------------------------
+    // Screen fractions to camera-space metres, at a chosen depth: the whole
+    // cabin is laid out this way so it frames the same share of the view at
+    // any window aspect.
+    const float tanHalf = std::tan(cam.fovY * 0.5f);
+    auto hwAt = [&](float z) { return tanHalf * cam.aspect * z; };
+    auto hhAt = [&](float z) { return tanHalf * z; };
+    // A slab of panelling spanning a rectangle of the view at depth z.
+    auto slab = [&](float z, float u0, float u1, float v0, float v1,
+                    const Vec3& colour, float thick = 0.012f) {
+        const float hw = hwAt(z), hh = hhAt(z);
+        P.box(Vec3((u0 + u1) * 0.5f * hw, (v0 + v1) * 0.5f * hh, z),
+              Vec3(std::fabs(u1 - u0) * 0.5f * hw, std::fabs(v1 - v0) * 0.5f * hh, thick),
+              colour, 1.0f);
+    };
+
+    // ---- the brow ----------------------------------------------------------
+    // A band of panelling over the glass carrying the two overhead screens.
+    // It is the deepest part of the cabin frame because it is where the
+    // pilot's eye goes between shots: the contract on the right, the
+    // controls on the left, both inside the machine rather than over it.
+    const float bz = lay.browZ;
     if (!lay.openTop) {
-        // The beam over the glass. Thickness follows the frame but is capped:
-        // a heavy hull gets a heavier bar, not a quarter of the view.
         const float beamH = std::min(pr * 0.8f, 0.045f);
-        P.box(Vec3(0.0f, top, zP + 0.04f), Vec3(px + pr, beamH, 0.14f), kFrame);
-        // The roof plate seen from below, just behind the beam: a thin band,
-        // enough to say "enclosed" without hiding the sky.
-        P.box(Vec3(0.0f, top + beamH + 0.03f, zP - 0.02f), Vec3(px + pr + 0.1f, 0.025f, 0.18f),
-              kFrame * 0.7f);
+        // The lit lip along the underside, where the panelling meets glass.
+        // It sits back at the pillar plane rather than under the brow: it
+        // used to reach forward to z = 0.90, which is in FRONT of the brow
+        // screens, and quietly ate the bottom half of everything lit on
+        // them.
+        P.box(Vec3(0.0f, top, zP + 0.16f), Vec3(px + pr, beamH, 0.14f), kFrame);
+        slab(bz + 0.04f, -1.30f, 1.30f, lay.roofYf + 0.010f, 1.60f, kFrame * 0.92f, 0.020f);
+        slab(bz + 0.02f, -1.30f, 1.30f, lay.roofYf + 0.010f, lay.roofYf + 0.030f,
+             kGlassRim * 0.55f, 0.006f);
         if (lay.mullion)
             P.box(Vec3(0.0f, (top + lay.dashY) * 0.5f, zP + 0.06f),
                   Vec3(pr * 0.9f, (top - lay.dashY) * 0.5f, pr * 1.2f), kFrame);
@@ -282,32 +417,57 @@ void submitCabin(Rasterizer& raster, const Camera& cam, const CabinLayout& layIn
             }
         }
     } else {
-        // Open cradle: a periscope frame overhead and hydraulic columns.
-        P.box(Vec3(0.0f, top - 0.02f, zP - 0.15f), Vec3(0.22f, 0.05f, 0.14f), kFrame);
-        P.box(Vec3(0.0f, top - 0.16f, zP - 0.15f), Vec3(0.05f, 0.10f, 0.05f), kFrame * 0.8f);
+        // Open cradle: no roof to sink screens into, so they hang off a roll
+        // frame - two mounts and a cross-tube above the pilot's head.
+        slab(bz + 0.05f, -1.30f, 1.30f, lay.roofYf + 0.055f, lay.roofYf + 0.105f,
+             kFrameLit * 0.8f, 0.030f);
         for (int side = -1; side <= 1; side += 2)
             P.cyl(Vec3(static_cast<float>(side) * (px + 0.32f), bottom, zP - 0.30f),
                   Vec3(0.0f, 1.0f, 0.0f), 0.09f, top - bottom + 0.2f, kFrameLit * 0.8f);
+        for (int side = -1; side <= 1; side += 2)
+            P.box(Vec3(static_cast<float>(side) * hwAt(bz) * 0.55f,
+                       hhAt(bz) * (lay.roofYf + 0.30f), bz + 0.06f),
+                  Vec3(0.020f, hhAt(bz) * 0.26f, 0.020f), kFrame);
     }
+    // The two brow screens, and the panelling immediately around them.
+    slab(bz + 0.03f, -1.30f, 1.30f, lay.roofYf + 0.025f, 1.60f, kFrame, 0.014f);
+    P.screen(lay.browL, kFrameLit, 0.010f * lay.plate);
+    P.screen(lay.browR, kFrameLit, 0.010f * lay.plate);
 
     // ---- the console -------------------------------------------------------
     {
-        const float dz = lay.dashZ;
-        // Top slab, tilted a little toward the pilot.
-        P.chamfer(Vec3(0.0f, lay.dashY - 0.03f, dz), Vec3(lay.dashHalfW, 0.035f, 0.22f), kConsole,
-                  Mat4::rotationX(-0.16f));
-        // The face below it, down to the floor.
-        P.box(Vec3(0.0f, lay.dashY - 0.22f, dz + 0.20f), Vec3(lay.dashHalfW, 0.20f, 0.12f), kFrame * 0.8f);
-        // A lit lip at the far edge: the line where the glass starts.
-        P.box(Vec3(0.0f, lay.dashY + 0.005f, dz + 0.27f), Vec3(lay.dashHalfW, 0.008f, 0.012f), kGlassRim, 0.1f);
-        // Console radar scope: a dark bezel on the console where the radar
-        // (painted in the ASCII pass) sits; the hood grows with the sensor.
-        const float scope = lay.scopeSize;
-        P.box(lay.scope, Vec3(scope * 3.0f, 0.006f, scope * 1.5f), kBezel, 0.2f);
-        P.box(lay.scope + Vec3(0.0f, 0.03f, scope * 1.4f), Vec3(scope * 3.1f, 0.03f, 0.02f),
-              st.jammed ? Vec3(0.9f, 0.25f, 0.2f) * (0.4f + 0.6f * std::fabs(std::sin(st.time * 13.0f)))
-                        : kFrame,
-              st.jammed ? 0.9f : 0.0f);
+        // A wall of instruments standing between the pilot's knees and the
+        // glass. It runs off the bottom of the view, so nothing of the world
+        // shows underneath it, and a lit lip along the top is the line where
+        // the windscreen ends.
+        slab(lay.panelZ + 0.030f, -1.40f, 1.40f, lay.panelBot - 1.2f, lay.panelTop,
+             kConsole, 0.016f);
+        slab(lay.panelZ + 0.016f, -1.40f, 1.40f, lay.panelTop - 0.020f, lay.panelTop,
+             kGlassRim * 0.5f, 0.006f);
+        // A shallow coaming over the top of the panel: the console has depth,
+        // but it is depth going AWAY from the pilot rather than a shelf
+        // rising up the view.
+        P.chamfer(Vec3(0.0f, lay.dashY + 0.012f, lay.panelZ + 0.16f),
+                  Vec3(lay.dashHalfW, 0.014f, 0.16f), kFrame, Mat4::rotationX(-0.06f));
+        // Divider ribs between the screens, so the console reads as three
+        // fitted units rather than one painted board.
+        for (float u : {lay.cutL, lay.cutR})
+            slab(lay.panelZ + 0.014f, u - 0.007f, u + 0.007f, lay.panelBot - 0.3f,
+                 lay.panelTop - 0.02f, kFrame * 0.85f, 0.008f);
+    }
+    // Damage flashes the machine panel; heat warms the gun panel; the radar's
+    // bezel is what goes red under a jammer.
+    {
+        const Vec3 flash = lerp(kFrameLit, Vec3(1.0f, 0.45f, 0.35f), st.damageFlash);
+        const Vec3 hot = st.overheated
+            ? Vec3(1.0f, 0.45f, 0.2f) * (0.4f + 0.5f * std::fabs(std::sin(st.time * 16.0f)))
+            : kFrameLit;
+        const Vec3 jam = st.jammed
+            ? Vec3(0.9f, 0.25f, 0.2f) * (0.3f + 0.5f * std::fabs(std::sin(st.time * 13.0f)))
+            : kFrameLit;
+        P.screen(lay.dashL, flash, 0.010f * lay.plate);
+        P.screen(lay.dashC, jam, 0.012f * lay.plate);
+        P.screen(lay.dashR, hot, 0.010f * lay.plate);
     }
 
     // ---- casemate breech ---------------------------------------------------
@@ -323,56 +483,132 @@ void submitCabin(Rasterizer& raster, const Camera& cam, const CabinLayout& layIn
         P.cyl(Vec3(0.90f, lay.dashY + 0.46f, lay.dashZ + 0.05f), Vec3(0.0f, 0.0f, 1.0f), 0.05f, 0.9f, kFrameLit);
     }
 
-    // ---- instruments -------------------------------------------------------
+    // ---- the instruments ---------------------------------------------------
+    // Every reading the console gives is a physical fitting on one of its
+    // faces: an engraved label plate, a lit gauge, an annunciator. The text
+    // pass only fills in the digits, at the same face coordinates, so a
+    // number always sits in its own sunk window and never over the world.
     const Vec3 good(0.40f, 1.00f, 0.50f), warn(1.00f, 0.72f, 0.25f), bad(1.00f, 0.32f, 0.25f);
     const Vec3 cool(0.35f, 0.65f, 1.00f);
-    // Hull: green to red, and the whole bar flashes on a hit.
+    const Vec3 dead(0.10f, 0.12f, 0.11f);
+    // Where a row's three fittings live across a face, left to right: the
+    // engraved name, the gauge, the digit window.
+    const float uLab0 = -0.97f, uLab1 = -0.50f;
+    const float uBar0 = -0.44f, uBar1 = 0.36f;
+    const float uNum0 = 0.42f, uNum1 = 0.97f;
+
+    // ---- left face: structure, heat, and the systems fitted ---------------
     {
-        Vec3 c = gaugeColour(st.hull, good, warn, bad);
-        if (st.damageFlash > 0.0f) c = lerp(c, Vec3(1.0f, 1.0f, 1.0f), st.damageFlash * 0.8f);
-        P.bar(lay.hullBar, lay.barLen, st.hull, c);
-    }
-    // Heat: blue, warming through amber to red; strobes when overheated.
-    {
-        Vec3 c = lerp(cool, warn, clampf(st.heat / 0.7f, 0.0f, 1.0f));
-        if (st.heat > 0.7f) c = lerp(warn, bad, (st.heat - 0.7f) / 0.3f);
-        if (st.overheated) c = bad * (0.5f + 0.5f * std::fabs(std::sin(st.time * 16.0f)));
-        P.bar(lay.heatBar, lay.barLen, st.heat, c);
-    }
-    // Ability lamps, one per fitted slot: dim while cooling, green when ready,
-    // amber while engaged.
-    {
+        const CabinPanel& f = lay.dashL;
+        const int n = cabinRowCount(2 + st.abilityCount);
+        const float vh = 0.78f / static_cast<float>(n);
+        // Structure: green through amber to red, and the whole bar flashes
+        // white on a hit, which is the cabin's own damage indicator.
+        {
+            const float v = cabinRowV(0, n);
+            Vec3 c = gaugeColour(st.hull, good, warn, bad);
+            if (st.damageFlash > 0.0f) c = lerp(c, Vec3(1.0f, 1.0f, 1.0f), st.damageFlash * 0.8f);
+            P.plate(f, uLab0, uLab1, v, vh, kFrameLit);
+            P.gauge(f, uBar0, uBar1, v, st.hull, c, vh);
+            P.plate(f, uNum0, uNum1, v, vh, kBezel * 0.8f);
+        }
+        // Heat: blue, warming through amber to red, strobing when the sink
+        // is full and the guns have stopped answering.
+        {
+            const float v = cabinRowV(1, n);
+            Vec3 c = lerp(cool, warn, clampf(st.heat / 0.7f, 0.0f, 1.0f));
+            if (st.heat > 0.7f) c = lerp(warn, bad, (st.heat - 0.7f) / 0.3f);
+            if (st.overheated) c = bad * (0.5f + 0.5f * std::fabs(std::sin(st.time * 16.0f)));
+            P.plate(f, uLab0, uLab1, v, vh, kFrameLit);
+            P.gauge(f, uBar0, uBar1, v, st.heat, c, vh);
+            P.plate(f, uNum0, uNum1, v, vh, kBezel * 0.8f);
+        }
+        // One annunciator per system the machine actually carries: dim while
+        // it recharges, green when it will fire, amber while it is running.
         int k = 0;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 4 && 2 + k < n; ++i) {
             if (!st.abilityFitted[i]) continue;
-            const Vec3 at = lay.abilityLamps + Vec3(lay.lampPitch * static_cast<float>(k++), 0.0f, 0.0f);
-            Vec3 c;
-            float e;
+            const float v = cabinRowV(2 + k, n);
+            Vec3 c; float e;
             if (st.abilityEngaged[i]) { c = warn; e = 1.0f; }
-            else if (st.abilityReady[i]) { c = good; e = 0.85f; }
-            else { c = lerp(good * 0.25f, good * 0.6f, 1.0f - st.abilityCool[i]); e = 0.4f; }
-            P.lamp(at, c, e);
+            else if (st.abilityReady[i]) { c = good; e = 0.9f; }
+            else { c = lerp(good * 0.22f, good * 0.55f, 1.0f - st.abilityCool[i]); e = 0.4f; }
+            P.pip(f, -0.90f, v, c, e, 0.045f);
+            P.plate(f, uNum0, uNum1, v, vh * 0.85f, kBezel * 0.8f);
+            ++k;
         }
     }
-    // Gun lamps: one per mount. Off = dark, ready = green, cycling = dim,
-    // dry = red, and a rotary spooling or a group blooming warms to amber.
-    for (int i = 0; i < st.gunCount; ++i) {
-        const Vec3 at = lay.gunLamps + Vec3(lay.lampPitch * static_cast<float>(i), 0.0f, 0.0f);
-        Vec3 c; float e;
-        if (!st.gunEnabled[i]) { c = Vec3(0.12f, 0.14f, 0.13f); e = 0.2f; }
-        else if (st.gunEmpty[i]) { c = bad; e = 0.6f; }
-        else if (st.gunReady[i]) { c = lerp(good, warn, st.gunHeat[i]); e = 0.9f; }
-        else { c = good * 0.35f; e = 0.35f; }
-        P.lamp(at, c, e);
-    }
-    // Jump charge (or grip, while climbing).
-    if (st.climbing) P.bar(lay.jumpBar, lay.barLen, 1.0f, Vec3(0.75f, 0.95f, 0.85f) * 0.8f);
-    else P.bar(lay.jumpBar, lay.barLen, st.jump, warn);
-    // Threat lamp in the centre: lit red when something hostile can see you.
+
+    // ---- right face: the drive, and the guns ------------------------------
     {
-        const bool on = st.threat && std::fmod(st.time, 0.6f) < 0.4f;
-        P.lamp(lay.threatLamp, on ? bad : Vec3(0.18f, 0.08f, 0.07f), on ? 1.0f : 0.25f, 0.030f);
+        const CabinPanel& f = lay.dashR;
+        const int n = cabinRowCount(2 + st.gunCount);
+        const float vh = 0.78f / static_cast<float>(n);
+        // Road speed, as a fitting rather than a number over the world: a
+        // lit bar that runs out along the panel, with tick marks behind it
+        // so the pilot can read a pace off it without reading the digits.
+        {
+            const float v = cabinRowV(0, n);
+            P.plate(f, uLab0, uLab1, v, vh, kFrameLit);
+            const Vec3 dial = lerp(Vec3(0.35f, 0.72f, 1.00f), Vec3(0.55f, 1.00f, 0.85f),
+                                   st.speedFrac);
+            P.gauge(f, uBar0, uBar1, v, st.speedFrac, dial, vh);
+            // Quarter marks along the top of the track.
+            for (int t = 1; t < 4; ++t) {
+                const float u = uBar0 + (uBar1 - uBar0) * 0.25f * static_cast<float>(t);
+                P.pip(f, u, v + vh * 1.15f, kGlassRim * 3.0f, 0.8f, 0.012f);
+            }
+            P.plate(f, uNum0, uNum1, v, vh, kBezel * 0.8f);
+        }
+        // Jump charge, or the grip the limbs have while the machine is on a
+        // wall - the same gauge, because they are the same question: how
+        // much have the legs got stored.
+        {
+            const float v = cabinRowV(1, n);
+            P.plate(f, uLab0, uLab1, v, vh, kFrameLit);
+            if (st.climbing) P.gauge(f, uBar0, uBar1, v, 1.0f, Vec3(0.75f, 0.95f, 0.85f), vh);
+            else P.gauge(f, uBar0, uBar1, v, st.jump, warn, vh);
+            P.plate(f, uNum0, uNum1, v, vh, kBezel * 0.8f);
+        }
+        // One lamp per mount: dark when switched off, green when it will
+        // fire, dim while it cycles, red when it is dry - and warming to
+        // amber as a rotary spools or a group's group blooms open.
+        for (int i = 0; i < st.gunCount && 2 + i < n; ++i) {
+            const float v = cabinRowV(2 + i, n);
+            Vec3 c; float e;
+            if (!st.gunEnabled[i]) { c = dead; e = 0.2f; }
+            else if (st.gunEmpty[i]) { c = bad; e = 0.7f; }
+            else if (st.gunReady[i]) { c = lerp(good, warn, st.gunHeat[i]); e = 0.95f; }
+            else { c = good * 0.35f; e = 0.35f; }
+            P.pip(f, -0.92f, v, c, e, 0.042f);
+            P.plate(f, uNum0, uNum1, v, vh * 0.85f, kBezel * 0.8f);
+        }
     }
+
+    // ---- the caution row ---------------------------------------------------
+    // Four annunciators on the coaming over the radar. The faces carry the
+    // numbers; these are the four things worth catching out of the corner of
+    // the eye while looking through the glass.
+    {
+        const bool blink = std::fmod(st.time, 0.6f) < 0.4f;
+        struct Ann { bool on; Vec3 lit; };
+        const Ann anns[4] = {
+            {st.hull < 0.30f && blink, bad},                       // structure
+            {st.overheated || st.heat > 0.85f, warn},              // heat
+            {st.threat && blink, bad},                             // seen
+            {st.jammed && blink, Vec3(0.75f, 0.55f, 1.0f)},        // jammed
+        };
+        const float pitch = 0.048f * hwAt(lay.panelZ);
+        const float y = (lay.panelTop - 0.038f) * hhAt(lay.panelZ);
+        for (int i = 0; i < 4; ++i) {
+            const float x = lay.dashC.centre.x + (static_cast<float>(i) - 1.5f) * pitch;
+            const Vec3 at(x, y, lay.panelZ - 0.004f);
+            P.box(at, Vec3(pitch * 0.40f, 0.008f, 0.003f), kBezel, 0.5f);
+            P.box(at - Vec3(0.0f, 0.0f, 0.004f), Vec3(pitch * 0.28f, 0.005f, 0.003f),
+                  anns[i].on ? anns[i].lit : anns[i].lit * 0.10f, anns[i].on ? 1.0f : 0.22f);
+        }
+    }
+
 }
 
 } // namespace sb

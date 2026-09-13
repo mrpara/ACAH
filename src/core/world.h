@@ -29,12 +29,14 @@ struct SurfaceHit {
 
 struct PropInstance {
     int meshIndex = 0;
+    int pieceIndex = -1;           // the StructurePiece it was stamped from
     Mat4 xform = Mat4::identity();
     Vec3 tint{1.0f, 1.0f, 1.0f};
     Vec3 pos{0.0f, 0.0f, 0.0f};
     float radius = 1.0f;
     float height = 1.0f;
     bool major = false;            // drawn even at long range
+    bool hidden = false;           // demolished mid-mission: neither drawn nor solid
 };
 
 class World {
@@ -54,6 +56,9 @@ public:
     int addDynamicObstacle(const Obstacle& o);
     void finalizeObstacles();
     void disableObstacle(int idx);
+    // Demolition: hides every structure whose footprint centre lies within
+    // `radius` of `at` and switches off its obstacles. Returns how many.
+    int demolishNear(const Vec3& at, float radius);
 
     const Terrain& terrain() const { return terrain_; }
     float waterLevel() const { return arena_.waterLevel; }
@@ -71,6 +76,9 @@ public:
     bool hasWater() const { return arena_.waterLevel > -9000.0f; }
     const ArenaDef& arena() const { return arena_; }
     const std::vector<Obstacle>& obstacles() const { return obstacles_; }
+    // The placed props, for anything that wants to draw the map rather than
+    // ask it one point at a time - the radar stamps buildings from this.
+    const std::vector<PropInstance>& propInstances() const { return props_; }
     float extent() const { return arena_.extent; }
 
     void submit(Rasterizer& raster, const Vec3& viewPos, float viewDistance) const;
@@ -100,10 +108,17 @@ public:
     // stop. The legs and the ride-height spring lift the body over them.
     Vec3 resolveCollision(const Vec3& desired, float radius,
                           Vec3* outNormal = nullptr, ObstacleKind* outKind = nullptr,
-                          float stepOverTop = -1e9f) const;
+                          float stepOverTop = -1e9f,
+                          float stepOverBase = -1e9f) const;
 
     // True if the point is inside any solid.
     bool insideSolid(const Vec3& p, float margin = 0.0f) const;
+    // The nearest solid FACE to a point, whether the point is outside the
+    // box or inside it. A ray cannot answer that question from inside
+    // geometry - every raycast in here refuses an origin that starts in a
+    // box - so anything that has to keep working while it is embedded (the
+    // climb probe, above all) asks this instead.
+    SurfaceHit nearestFace(const Vec3& p, float reach) const;
 
     Vec3 clampToWorld(const Vec3& p, float margin) const;
 

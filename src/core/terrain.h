@@ -77,6 +77,11 @@ public:
     Vec3 clampToWorld(const Vec3& p, float margin) const;
 
     const std::vector<Mesh>& tiles() const { return tiles_; }
+    // The same tiles at a third of the vertex density, for the far field:
+    // beyond a hundred metres a three-metre vertex is a fraction of a
+    // character cell, and drawing it is what made wide-open arenas the
+    // slowest ones. Same index as tiles().
+    const std::vector<Mesh>& coarseTiles() const { return coarseTiles_; }
     const std::vector<Vec3>& tileCenters() const { return tileCenters_; }
     float tileRadius() const { return tileRadius_; }
     const TerrainProfile& profile() const { return profile_; }
@@ -91,6 +96,7 @@ private:
     float vertexStep_ = 2.0f;
     float tileRadius_ = 0.0f;
     std::vector<Mesh> tiles_;
+    std::vector<Mesh> coarseTiles_;
     std::vector<Vec3> tileCenters_;
 };
 

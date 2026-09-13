@@ -84,6 +84,28 @@ hold, escorts, convoy interceptions, radar blackouts with an alarm level,
 timed destruction windows, breakthroughs under a walking barrage, and named
 elite kills. A boss or set-piece closes each act.
 
+Five of the contracts carry a **bounty elite**: a named spidertank with a
+hand-built loadout (the Tollkeeper's incendiaries, the Auditor's railgun,
+the Anvil's siege cannon...). Kill it and its signature weapon is salvaged
+into the workshop for nothing, and stays yours for the run. The chain also
+has set-pieces of its own: a relay blackout that really does turn the lights
+out, an ambush sprung on an extraction point and another on a crawler
+halfway across the sound, a creeping barrage to outrun on the way up to
+the storm line, a wired bridge chain that goes twenty seconds after you pass
+its middle, and a fortress taken by its weak points - shield generators
+first, then the towers, then the gate.
+
+Beyond the infantry, wheels and armour of the first act and the marksmen,
+mortars, jammers and wardens of the second, the late campaign fields a third
+tier: rotor gunships that circle out of reach of anything that cannot
+elevate, rocket trucks that salvo from behind the line and move before the
+counter-battery arrives, shield pylons under which nothing can be hurt
+until the pylon itself is, and sappers - mines on legs that rush the hull
+in packs and detonate an EMP charge against it. Two of the fifteen contracts
+are now fought in fully built-up ground - a transit district on a street
+grid and a tenement quarter - where the garrison waits in the alleys rather
+than on the road.
+
 Completing an objective is a checkpoint: dying costs a fifth of the payout and
 returns you there patched to fighting shape, never the whole mission. The
 debrief is an after-action ledger - kills by type, structures wrecked,
@@ -130,27 +152,48 @@ causeway chains the whole battlefield.
 | `-` `=` | Glyph scale, for high-DPI displays |
 | `F11` | Fullscreen (the game starts fullscreen; `--windowed` to opt out) |
 | `Esc` | Pause; `Q` on the pause screen quits |
+| `O` | Controls screen (from any menu or the pause banner): rebind every key and pad button |
 
-The game starts in the **pilot's cabin**: the instruments - hull, heat,
-ability lamps, a lamp per gun, jump charge, the contact lamp and the radar
-scope - are on the console in front of you, and the cabin's frame is the
-chassis you bought (a casemate has its breech in there with you; a low-profile
-hull is a bubble on struts; a fire platform is an open cradle). Armour tier
-thickens the frame, sensor tier grows the scope. `X` steps outside to the
-third-person view, which has stronger shot tracking to make up for aiming from
-behind the machine.
+Every gameplay key above is rebindable. Open the controls screen with `O`
+(or `Share` on a pad) from a briefing, the workshop or the pause banner:
+pick an action, press `Enter` and then the key you want, or `Tab` to bind
+the pad button for it instead; `X` unbinds. Bindings are saved to
+`acah_controls.txt` next to the executable. The menu keys themselves
+(arrows, `Enter`, `Backspace`, `Tab`, `Esc`) are fixed so a bad binding can
+never lock you out of the screen that fixes it. Once a pad is the last thing
+you touched, every menu hint shows the pad button instead of the key.
+
+The game starts in the **pilot's cabin**, and the cabin is the whole
+interface: nothing floats over the glass. Five instrument faces are set into
+the panelling - two in the brow over the windscreen (the control plate on
+the left, the contract and the contact count on the right) and three in the
+console under it (structure, heat and the systems you have fitted; the radar
+screen; the drive and one row per gun). The gauges are fittings, not text:
+lit bars, annunciator lamps and engraved plates, with the digits sunk into
+their own windows beside them. Four caution lamps along the coaming cover
+the things worth catching out of the corner of your eye - low structure,
+heat, being seen, being jammed.
+
+The cabin's frame is the chassis you bought (a casemate has its breech in
+there with you; a low-profile hull is a bubble on struts; a fire platform is
+an open cradle). Armour tier thickens the bezels. `X` steps outside to the
+third-person view, which keeps the old floating panels and has stronger shot
+tracking to make up for aiming from behind the machine.
 
 ### Gamepad
 
 Plug in a DualShock 4 (or any pad SDL knows) before or after launch. Left
-stick drives, deflection is pace; right stick looks. `R2` / `L2` fire groups
-1 / 2; `Cross` holds a jump charge; `L1` `R1` `Square` `Circle` are the legs /
+stick drives, deflection is pace; right stick looks. `L2` / `R2` fire the
+left / right weapon groups; `Cross` holds a jump charge; `L1` `R1` `Square` `Circle` are the legs /
 engine / armour / sensor abilities; `Triangle` cycles the gunsight; `R3`
 steps outside the cabin; D-pad toggles mounts 1-4; `Options` pauses in the
 field and continues past briefings; `Touchpad` toggles the HUD; `Share` mutes.
 In the workshop: D-pad or stick to navigate, `Cross` fits, `Circle` backs
-out, `Triangle` compares, `Square` sells, `Options` deploys. Hull hits and
-your own guns come through the rumble motors.
+out, `Triangle` compares, `Square` sells, `Options` deploys, `Share` opens
+the controls screen. Hull hits and your own guns come through the rumble
+motors. All of the field bindings can be changed on the controls screen;
+the names shown follow the pad that is plugged in (Cross / Circle on a
+DualShock, A / B on anything else).
 
 Command-line options: `--width N --height N --ss N --seed N --threads N
 --fullscreen --no-vsync --raw --background N --font N --ramp N --dither`.
@@ -187,6 +230,14 @@ the wall — so the fall damage on the way down is part of the decision.
 Enemies climb too, and anything that can hold a wall will come after you up one
 rather than stand at the bottom. Their turrets elevate to 82°, so height is
 cover from the ground but not from a machine that follows you up.
+
+Climbing **down** is the same gesture in reverse: stand at the edge of a
+roof, look down over it, and drive forward. Instead of stepping off into a
+fall the machine commits to the face below the lip and walks down it, and
+lets go by itself when its feet reach the ground. Look level (or jump) and
+it walks off the edge as before. Falls are priced by the legs: the jump
+specialists (Grasshopper, Courser) shrug off drops that would cripple a
+Titan or an Anvil set.
 
 ### The hull families
 
@@ -284,14 +335,19 @@ biting into a wall. That is partly to keep the game a single self-contained
 executable with no asset folder, and partly because a bank of detuned saws is
 the right instrument for something drawn in characters.
 
-The soundtrack is synthesised live in four flavours, assigned per mission:
+The soundtrack is synthesised live in seven flavours, assigned per mission:
 dark synthwave (a relentless detuned-saw pulse under a closed filter that
 opens with the fighting), breakbeat (fast broken drums and an urgent bass
 riff), brooding ambient techno (fog and a heartbeat that only condenses into
-drums when the fight is real), and hybrid orchestral (drum-corps percussion
-and brass-like stacked fifths, the finale sound). Every flavour reads the same
-live intensity the game tracks, so it swells into a fight and settles out of
-one - and boss missions push their flavour faster and a step darker.
+drums when the fight is real), hybrid orchestral (drum-corps percussion and
+brass-like stacked fifths, the finale sound), industrial (a sixteenth-note
+distorted bass sequencer under a half-time snare, metal on every beat),
+drum and bass (two-step drums at 170 with a reese bass and pads that thin
+out as the fight heats), and noir (trip-hop at a crawl, electric piano
+sevenths over a walking bass and vinyl crackle). Every flavour reads the
+same live intensity the game tracks, so it swells into a fight and settles
+out of one - and boss missions push their flavour faster and a step darker.
+The workshop and the debrief have a quiet theme of their own.
 
 `M` mutes, and `,` / `.` move the volume.
 

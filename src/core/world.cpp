@@ -113,6 +113,24 @@ void World::disableObstacle(int idx) {
         obstacles_[static_cast<size_t>(idx)].active = false;
 }
 
+int World::demolishNear(const Vec3& at, float radius) {
+    int n = 0;
+    for (PropInstance& p : props_) {
+        if (p.hidden) continue;
+        if (lengthSq(flattenY(p.pos - at)) > radius * radius) continue;
+        p.hidden = true;
+        ++n;
+        // Its collision boxes: the structure's obstacles were pushed in one
+        // run right after the instance, all within its own radius.
+        for (Obstacle& o : obstacles_) {
+            if (!o.active) continue;
+            if (lengthSq(flattenY(o.center - p.pos)) <= (p.radius + 2.0f) * (p.radius + 2.0f))
+                o.active = false;
+        }
+    }
+    return n;
+}
+
 void World::addTestBox(const Vec3& center, const Vec3& half, bool climbable) {
     Obstacle o;
     o.center = center;
@@ -237,6 +255,7 @@ void World::addStructure(int meshIndex, const Vec3& pos, float yaw, float scale,
     const StructurePiece& piece = pieces_[static_cast<size_t>(meshIndex)];
     PropInstance inst;
     inst.meshIndex = meshIndex;
+    inst.pieceIndex = meshIndex;
     inst.xform = Mat4::translation(pos) * Mat4::rotationY(yaw) * Mat4::scaling(Vec3(scale));
     inst.tint = tint;
     inst.pos = pos;
@@ -321,6 +340,32 @@ void World::placeStructures(uint32_t seed) {
                 return Vec3(std::cos(lineAngle) * along - std::sin(lineAngle) * across, 0.0f,
                             std::sin(lineAngle) * along + std::cos(lineAngle) * across);
             }
+            case DistrictLayout::Metro: {
+                // A rectangular grid in the STRETCHED frame that FOLLOWS THE
+                // LANE: six rows of blocks, three each side of the route,
+                // strung along the whole length of the map, each column
+                // shifted across by the lane's own sweep at that point so the
+                // avenue runs down the middle of the city from end to end.
+                // Returned already elongated (the caller must not stretch it
+                // again). `total` is rows * cols, computed by the caller.
+                const int rows = 6;
+                const float pitchAlong = 38.0f, pitchAcross = 40.0f;
+                const float spanAlong = arena_.extent * 0.72f;    // half-length
+                const int cols = std::max(2, static_cast<int>((spanAlong * 2.0f) / pitchAlong));
+                const int gc = i % cols, gr = (i / cols) % rows;
+                const float along = -spanAlong + pitchAlong * (gc + 0.5f) +
+                                    rng.range(-2.0f, 2.0f);
+                // The lane's across-offset here, in grid coordinates (the
+                // grid's across axis is minus the lane's perpendicular).
+                const float ext = arena_.extent * 0.92f;
+                const float t = (along / ext + 1.0f) * 0.5f;
+                const float sweep = -std::sin(t * TAU) * ext * 0.12f;
+                const float across = sweep + (static_cast<float>(gr) - rows * 0.5f + 0.5f) * pitchAcross +
+                                     rng.range(-2.0f, 2.0f);
+                (void)total; (void)R;
+                return Vec3(along * axC - across * axS, 1.0f,
+                            along * axS + across * axC);
+            }
             case DistrictLayout::None:
                 return Vec3(0.0f, -10000.0f, 0.0f);
             case DistrictLayout::Scattered:
@@ -333,18 +378,38 @@ void World::placeStructures(uint32_t seed) {
     };
 
     // ---- ruins -----------------------------------------------------------
-    const int ruinTotal = static_cast<int>(arena_.ruinCount * countScale + 0.5f);
+    const bool metro = arena_.layout == DistrictLayout::Metro;
+    const int ruinTotal = metro
+        ? 6 * std::max(2, static_cast<int>((arena_.extent * 1.44f) / 38.0f))
+        : static_cast<int>(arena_.ruinCount * countScale + 0.5f);
+    // The lane as a polyline, so a Metro grid can keep it as a street.
+    std::vector<Vec3> lanePts;
+    if (metro)
+        for (int k = 0; k <= 80; ++k) lanePts.push_back(laneAt(k / 80.0f));
+    auto onLane = [&](const Vec3& p, float margin) {
+        for (const Vec3& q : lanePts)
+            if (lengthXZ(p - q) < margin) return true;
+        return false;
+    };
     int placed = 0;
+    // A Metro grid visits every cell once; every other layout retries.
+    int cell = 0;
     for (int attempt = 0; attempt < ruinTotal * 8 && placed < ruinTotal; ++attempt) {
-        Vec3 spot = elongate(pickSpot(placed, ruinTotal));
+        if (metro && cell >= ruinTotal) break;
+        Vec3 spot = metro ? pickSpot(cell++, ruinTotal) : elongate(pickSpot(placed, ruinTotal));
         if (spot.y < -1000.0f) break;
+        spot.y = 0.0f;
         if (lengthXZ(spot) < arena_.spawnClear + 12.0f) continue;
         if (std::fabs(spot.x) > arena_.extent - 20.0f || std::fabs(spot.z) > arena_.extent - 20.0f) continue;
 
         const int variant = ruinFirst_ + static_cast<int>(rng.unit() * ruinCount_) % ruinCount_;
         const StructurePiece& piece = pieces_[static_cast<size_t>(variant)];
-        const float scale = rng.range(0.85f, 1.2f);
-        if (!spotIsClear(spot, piece.radius * scale + 6.0f)) continue;
+        const float scale = metro ? rng.range(0.9f, 1.1f) : rng.range(0.85f, 1.2f);
+        // The avenue: a block whose footprint would sit on the lane is
+        // skipped, so the route runs down a street rather than through
+        // a wall every hundred metres.
+        if (metro && onLane(spot, piece.radius * scale * 0.55f + 4.0f)) continue;
+        if (!spotIsClear(spot, piece.radius * scale + (metro ? 3.0f : 6.0f))) continue;
 
         // Steep ground makes a building float on one corner; skip those spots
         // and sink whatever is left so no edge hangs in the air.
@@ -358,8 +423,10 @@ void World::placeStructures(uint32_t seed) {
         if (hi - lo > 4.5f) continue;
         spot.y = lo - 0.4f;
 
-        addStructure(variant, spot, rng.range(0.0f, TAU), scale,
-                     Vec3(rng.range(0.88f, 1.12f)), true);
+        // Square to the streets in a Metro grid; any old way elsewhere.
+        const float yaw = metro ? -lineAngle + ((rng.unit() < 0.5f) ? 0.0f : PI * 0.5f)
+                                : rng.range(0.0f, TAU);
+        addStructure(variant, spot, yaw, scale, Vec3(rng.range(0.88f, 1.12f)), true);
         ++placed;
     }
 
@@ -576,24 +643,43 @@ void World::submit(Rasterizer& raster, const Vec3& viewPos, float viewDistance) 
     }
     const float tileCull = viewDistance + terrain_.tileRadius();
     const std::vector<Mesh>& tiles = terrain_.tiles();
+    const std::vector<Mesh>& coarse = terrain_.coarseTiles();
     const std::vector<Vec3>& centers = terrain_.tileCenters();
+    // Past this the far-field tile is drawn. Two thirds of the visible
+    // ground sits out there, and it was two thirds of every frame's
+    // triangles for detail the character grid cannot show.
+    const float lodDist = 95.0f + terrain_.tileRadius();
     for (size_t i = 0; i < tiles.size(); ++i) {
         const Vec3 d = centers[i] - viewPos;
-        if (lengthSq(Vec3(d.x, 0.0f, d.z)) > tileCull * tileCull) continue;
+        const float flatSq = lengthSq(Vec3(d.x, 0.0f, d.z));
+        if (flatSq > tileCull * tileCull) continue;
         DrawItem item;
-        item.mesh = &tiles[i];
+        item.mesh = (flatSq > lodDist * lodDist && i < coarse.size()) ? &coarse[i] : &tiles[i];
         item.rim = 0.12f;          // ground reads by shading, not by silhouette
         raster.submit(item);
     }
 
     const float minorCull = viewDistance * 0.55f;
     for (const PropInstance& p : props_) {
+        if (p.hidden) continue;
         const Vec3 d = p.pos - viewPos;
         const float distSq = lengthSq(Vec3(d.x, 0.0f, d.z));
         const float cull = p.major ? viewDistance : minorCull;
         if (distSq > cull * cull) continue;
+        // Too small to show: a piece of debris subtending under a couple of
+        // character cells is a smudge that cost a mesh. Screen size, not
+        // distance, is what decides that.
+        if (p.radius * p.radius < distSq * (0.011f * 0.011f)) continue;
         DrawItem item;
         item.mesh = &meshes_[static_cast<size_t>(p.meshIndex)];
+        // Past the LOD line a ruin is drawn as its shell. Two thirds of a
+        // dense district's triangles were window bays at two hundred
+        // metres, which is what made downtown the slowest map.
+        const float structLod = 82.0f;
+        if (distSq > structLod * structLod && p.pieceIndex >= 0 &&
+            p.pieceIndex < static_cast<int>(pieces_.size()) &&
+            !pieces_[static_cast<size_t>(p.pieceIndex)].lod.verts.empty())
+            item.mesh = &pieces_[static_cast<size_t>(p.pieceIndex)].lod;
         item.model = p.xform;
         // Structures are deliberately held down the ramp. Concrete and a steel
         // hull under the same light land on the same glyph, and then a tank
@@ -719,7 +805,7 @@ SurfaceHit World::findFoothold(const Vec3& searchPoint, const Vec3& up,
 
 Vec3 World::resolveCollision(const Vec3& desired, float radius,
                              Vec3* outNormal, ObstacleKind* outKind,
-                             float stepOverTop) const {
+                             float stepOverTop, float stepOverBase) const {
     Vec3 p = clampToWorld(desired, radius + 2.0f);
     float deepest = 0.0f;
     if (outNormal) *outNormal = Vec3(0.0f, 1.0f, 0.0f);
@@ -731,7 +817,15 @@ Vec3 World::resolveCollision(const Vec3& desired, float radius,
         for (int idx : scratch_) {
             const Obstacle& o = obstacles_[static_cast<size_t>(idx)];
             if (!o.active) continue;
-            if (o.center.y + o.half.y < stepOverTop) continue;   // step onto it
+            // Step onto it - but only if its top is somewhere near the
+            // feet. This used to be a bare "top below the step line", which
+            // is an ABSOLUTE height: standing on a twenty-metre roof, every
+            // box in the arena had its top below that line, so the whole
+            // city quietly stopped being solid and the machine could walk
+            // straight into the next building and be inside it the moment
+            // the line moved again.
+            const float obTop = o.center.y + o.half.y;
+            if (obTop < stepOverTop && obTop > stepOverBase) continue;
             Vec3 push, normal;
             if (!resolveSphereObstacle(o, p, radius, push, normal)) continue;
             p += push;
@@ -753,6 +847,30 @@ bool World::insideSolid(const Vec3& p, float margin) const {
         if (o.active && o.contains(p, margin)) return true;
     }
     return false;
+}
+
+SurfaceHit World::nearestFace(const Vec3& p, float reach) const {
+    SurfaceHit best;
+    float bestD = reach;
+    grid_.query(p, reach + 2.0f, scratch_);
+    for (int idx : scratch_) {
+        const Obstacle& o = obstacles_[static_cast<size_t>(idx)];
+        if (!o.active) continue;
+        Vec3 point, normal;
+        closestOnObstacle(o, p, point, normal);
+        // Inside the box, closestOnObstacle still names the nearest face and
+        // its outward normal, which is exactly what a climb needs to know.
+        const float d = length(point - p);
+        if (d >= bestD) continue;
+        bestD = d;
+        best.hit = true;
+        best.point = point;
+        best.normal = normal;
+        best.distance = d;
+        best.kind = o.kind;
+        best.obstacle = idx;
+    }
+    return best;
 }
 
 Vec3 World::clampToWorld(const Vec3& p, float margin) const {

@@ -25,6 +25,13 @@ namespace sb {
 struct WaveSpec {
     std::vector<Archetype> enemies;
     float delay = 0.0f;          // seconds after the previous wave clears
+    // A BOUNTY ELITE: one named machine with a hand-built loadout instead
+    // of the archetype's rolled kit, and a signature weapon that drops into
+    // the workshop when it dies. `enemies[0]` gives its brain.
+    bool elite = false;
+    std::string callsign;
+    Loadout eliteLoadout;
+    std::string dropWeapon;
 };
 
 // What one segment of a mission asks of the pilot. A mission is a short chain
@@ -41,7 +48,9 @@ enum class ObjectiveKind : int {
     KillTarget,         // destroy the named elite machine(s)
     Convoy,             // destroy the moving column before it escapes
     Blackout,           // destroy the radar masts; noise brings reinforcements
-    Breakthrough        // cross the fortified line while the artillery walks in
+    Breakthrough,       // cross the fortified line while the artillery walks in
+    KillUnits,          // destroy every marked unit of one kind (pylons, towers)
+    Outrun              // reach the zone ahead of a creeping barrage
 };
 
 struct ObjectiveSpec {
@@ -70,6 +79,24 @@ struct ObjectiveSpec {
     // advances the mission whether or not the last picket died. Only real
     // elimination objectives make you kill everything.
     bool advanceOnReach = false;
+    // ---- wave 15 ---------------------------------------------------------
+    // The third tier: gunships circle the objective, rocket trucks salvo
+    // from behind it and move, shield pylons make the pocket (and its marked
+    // targets) immune until they fall, sappers rush the hull in packs.
+    int gunships = 0, launchers = 0, pylons = 0, sappers = 0;
+    // Set-pieces. `ambush`: reaching the zone springs a trap around the
+    // player (or, on an escort, halfway along its road). `lightsOut`: when
+    // this objective completes the sector goes dark. `collapse`: the deck
+    // behind the player is blown once they are past the middle of the
+    // segment. `barrageSpeed`: an Outrun's creeping barrage, metres/second.
+    // `gateHealth`: a DestroyMarked's targets are one armoured GATE instead
+    // of tanks and stacks. `killKind`: what a KillUnits objective marks.
+    bool ambush = false;
+    bool lightsOut = false;
+    bool collapse = false;
+    float barrageSpeed = 0.0f;
+    float gateHealth = 0.0f;
+    UnitKind killKind = UnitKind::Turret;
 };
 
 struct LevelDef {
@@ -105,6 +132,12 @@ struct PlayerProfile {
     int totalEarned = 0;
     // Spare magazines owned per weapon id, carried between missions.
     std::vector<std::pair<std::string, int>> ammoStock;
+    // Parts salvaged from bounty elites: free to fit, forever.
+    std::vector<std::string> unlocked;
+    bool hasUnlocked(const std::string& id) const {
+        for (const std::string& u : unlocked) if (u == id) return true;
+        return false;
+    }
 
     int ammoFor(const std::string& weaponId) const;
     void addAmmo(const std::string& weaponId, int rounds);
@@ -130,7 +163,7 @@ enum class MissionPhase : int {
 // payout is computed from.
 struct MissionLedger {
     int mechKills = 0;
-    int unitKills[6] = {0, 0, 0, 0, 0, 0};   // by UnitKind
+    int unitKills[16] = {};                  // by UnitKind (kUnitKindCount used)
     int propsDestroyed = 0;
     int objectivesDone = 0;
     // Kept for the profile's lifetime death count and for the debrief line.
@@ -145,6 +178,8 @@ struct MissionLedger {
     int cashClearance = 0;                   // sectors closed out properly
     int sectorsCleared = 0;
     float missionTime = 0.0f;
+    std::string salvagedPart;                // a bounty elite's weapon, if one fell
+    std::string eliteKilled;                 // its callsign
     int total(int completionBonus) const {
         const int t = cashKills + cashDestruction + cashObjectives +
                       cashTimeBonus + cashClearance + completionBonus;
@@ -234,6 +269,15 @@ public:
     float missionTime() const { return elapsed_; }
     // True when the stall guard has ordered the remaining hostiles to close.
     bool hunting() const { return hunting_; }
+    // Set-piece state for the HUD and the renderer: how dark the sector is
+    // (0 lit, 1 blacked out), where the creeping barrage line is along the
+    // mission axis (or a huge negative when there is none), and seconds
+    // until the deck behind the player goes (negative: not armed).
+    float blackout() const { return blackout_; }
+    float barrageAlong() const { return barrageAlong_; }
+    float collapseCountdown() const { return collapseTimer_; }
+    // The named machine the current objective is about, if any.
+    std::string eliteCallsign() const;
     // Damage the player landed this frame, so the HUD can flash a hit marker.
     float damageDealtThisFrame() const { return dealtThisFrame_; }
 
@@ -264,6 +308,16 @@ private:
     void dropAmmoCrate(const Vec3& at);
     void onUnitKilled(int idx);
     void onPropKilled(int idx);
+    // A spot near `near` that is tucked against a building and cannot be
+    // seen from `from`: where an ambusher waits. Falls back to `near`.
+    Vec3 hiddenSpot(const Vec3& near, const Vec3& from);
+    // Springs a trap: alerted infantry, rocket teams and a vehicle out of
+    // the alleys around `at`.
+    void spawnAmbush(const Vec3& at);
+    // Blows the causeway decks behind `along` (mission-axis coordinate).
+    void collapseDecksBehind(float along);
+    void fireShell(const Vec3& at, float scatter);
+    void updateShields();
     void respawnAtCheckpoint();
     // Position along the mission route, t 0..1. The route sweeps across the
     // district rather than running dead straight (see lanePoint), which is
@@ -338,6 +392,15 @@ private:
     Vec3 checkpointPos_{0.0f, 0.0f, 0.0f};
     float checkpointHealth_ = 1.0f;    // fraction restored on respawn
     int segmentWavesSpawned_ = 0;
+    // ---- wave 15 set-pieces ----
+    float blackout_ = 0.0f;
+    float blackoutTarget_ = 0.0f;
+    float barrageAlong_ = -1e9f;
+    float barrageTimer_ = 0.0f;
+    float collapseTimer_ = -1.0f;
+    bool collapsed_ = false;
+    bool ambushSprung_ = false;
+    bool escortAmbushSprung_ = false;
 };
 
 // How tough an enemy of this power level is, as a multiplier on its structure.
@@ -346,6 +409,7 @@ float enemyHealthScale(int power);
 // How hard hostile weapons hit, as a fraction of their listed rating, for a
 // mission of this power. The player's guns are never scaled.
 float enemyDamageScale(int power);
+float enemyArmorScale(int power);
 
 // Bounty for destroying a machine of this loadout at this power level.
 int bountyFor(const Loadout& l, const MechStats& s, int power);

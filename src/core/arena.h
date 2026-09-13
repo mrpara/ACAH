@@ -20,6 +20,8 @@ enum class DistrictLayout : int {
     Ring,            // structures around the rim, open middle
     Cluster,         // one dense knot of buildings
     Line,            // a strip, like a road or a canyon floor
+    Metro,           // a dense street grid the whole length of the lane,
+                     // blocks aligned to the streets, the lane kept as a road
     None
 };
 
@@ -62,6 +64,9 @@ struct ArenaDef {
 
     // How vertical the fight is meant to be, purely for the briefing text.
     const char* verticality = "LOW";
+    // A built-up map: garrisons hide in the alleys, ambushes come out of
+    // them, the endless generator leans on it.
+    bool urban = false;
 };
 
 // The full catalog, in campaign order.

@@ -116,6 +116,68 @@ struct Pad {
     }
 };
 
+// The core stores bindings as plain integers; these pin them to SDL's enums.
+static_assert(SDL_SCANCODE_W == 26 && SDL_SCANCODE_SPACE == 44 && SDL_SCANCODE_LSHIFT == 225,
+              "core/bindings.cpp assumes SDL's HID scancodes");
+static_assert(SDL_GAMEPAD_BUTTON_SOUTH == 0 && SDL_GAMEPAD_BUTTON_BACK == 4 &&
+              SDL_GAMEPAD_BUTTON_RIGHT_STICK == 8 && SDL_GAMEPAD_BUTTON_LEFT_SHOULDER == 9 &&
+              SDL_GAMEPAD_BUTTON_DPAD_UP == 11 && SDL_GAMEPAD_BUTTON_TOUCHPAD == 20,
+              "core/bindings.cpp assumes SDL's gamepad button order");
+static_assert(SDL_GAMEPAD_AXIS_LEFT_TRIGGER == 4 && SDL_GAMEPAD_AXIS_RIGHT_TRIGGER == 5,
+              "core/bindings.cpp assumes SDL's gamepad axis order");
+
+// Names for the controls screen and the menu hints. The pad names follow
+// the pad that is plugged in: a DualShock gets CROSS / CIRCLE, anything
+// else A / B.
+std::string keyCodeName(int code) {
+    if (code < 0 || code >= sb::kMouseCodeBase) return std::string();
+    const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(code));
+    return n ? std::string(n) : std::string();
+}
+
+std::string padCodeName(SDL_Gamepad* dev, int code) {
+    if (code < 0) return std::string();
+    if (code >= sb::kPadAxisBase) {
+        const int axis = code - sb::kPadAxisBase;
+        const bool ps = dev && SDL_GetGamepadType(dev) >= SDL_GAMEPAD_TYPE_PS3 &&
+                        SDL_GetGamepadType(dev) <= SDL_GAMEPAD_TYPE_PS5;
+        if (axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) return ps ? "L2" : "LT";
+        if (axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) return ps ? "R2" : "RT";
+        return "AXIS " + std::to_string(axis);
+    }
+    const SDL_GamepadButton b = static_cast<SDL_GamepadButton>(code);
+    if (dev) {
+        switch (SDL_GetGamepadButtonLabel(dev, b)) {
+            case SDL_GAMEPAD_BUTTON_LABEL_CROSS:    return "CROSS";
+            case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE:   return "CIRCLE";
+            case SDL_GAMEPAD_BUTTON_LABEL_SQUARE:   return "SQUARE";
+            case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE: return "TRIANGLE";
+            default: break;
+        }
+    }
+    const bool ps = dev && SDL_GetGamepadType(dev) >= SDL_GAMEPAD_TYPE_PS3 &&
+                    SDL_GetGamepadType(dev) <= SDL_GAMEPAD_TYPE_PS5;
+    switch (b) {
+        case SDL_GAMEPAD_BUTTON_SOUTH:          return ps ? "CROSS" : "A";
+        case SDL_GAMEPAD_BUTTON_EAST:           return ps ? "CIRCLE" : "B";
+        case SDL_GAMEPAD_BUTTON_WEST:           return ps ? "SQUARE" : "X";
+        case SDL_GAMEPAD_BUTTON_NORTH:          return ps ? "TRIANGLE" : "Y";
+        case SDL_GAMEPAD_BUTTON_BACK:           return ps ? "SHARE" : "BACK";
+        case SDL_GAMEPAD_BUTTON_GUIDE:          return "GUIDE";
+        case SDL_GAMEPAD_BUTTON_START:          return ps ? "OPTIONS" : "START";
+        case SDL_GAMEPAD_BUTTON_LEFT_STICK:     return ps ? "L3" : "LS";
+        case SDL_GAMEPAD_BUTTON_RIGHT_STICK:    return ps ? "R3" : "RS";
+        case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:  return ps ? "L1" : "LB";
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ps ? "R1" : "RB";
+        case SDL_GAMEPAD_BUTTON_DPAD_UP:        return "D-UP";
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN:      return "D-DOWN";
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT:      return "D-LEFT";
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:     return "D-RIGHT";
+        case SDL_GAMEPAD_BUTTON_TOUCHPAD:       return "TOUCHPAD";
+        default: return "PAD " + std::to_string(code);
+    }
+}
+
 // Radial deadzone with the remaining travel rescaled to 0..1, plus a gentle
 // curve so small deflections are fine control and the last third is speed.
 void stickVector(float x, float y, float* ox, float* oy, float dead, float curve) {
@@ -157,9 +219,10 @@ void printControls() {
         "  Tab          release the mouse cursor\n"
         "  F11          toggle fullscreen (default on; --windowed to start windowed)\n"
         "  Esc          pause (Q on the pause screen quits)\n"
+        "  O            controls screen: rebind every key and pad button (menus / pause)\n"
         "\nGamepad (DualShock 4 / any SDL pad, plug in any time):\n"
         "  Left stick   drive (deflection = pace)     Right stick  aim / look\n"
-        "  R2 / L2      fire group 1 / 2              Cross        hold to charge a jump\n"
+        "  L2 / R2      fire group L / R              Cross        hold to charge a jump\n"
         "  L1 / R1      legs / engine ability         Square/Circle armour / sensor ability\n"
         "  Triangle     gunner sight zoom             R3           first-person / third-person\n"
         "  D-pad        mounts 1-4 on/off             Options      continue / deploy\n"
@@ -360,11 +423,16 @@ int main(int argc, char** argv) {
 
     const Uint64 freq = SDL_GetPerformanceFrequency();
     Uint64 previous = SDL_GetPerformanceCounter();
-    bool fireHeld = false;
-    bool fire2Held = false;
+    bool mouseDown[8] = {};
+    std::vector<int> keyEdges;        // codes that went down this frame
     bool spaceWasDown = false;
     bool running = true;
     bool paused = false;
+    // Which device spoke last decides whether menus show keys or buttons.
+    bool padActive = false;
+    // Trigger edges for pad codes bound to "press" actions.
+    bool axisWasDown[SDL_GAMEPAD_AXIS_COUNT] = {};
+    game.loadBindings();
     int frameIndex = 0;
     bool pendingModeChange = false;   // set when V toggles the ASCII filter
     Pad pad;
@@ -377,6 +445,7 @@ int main(int argc, char** argv) {
             SDL_free(ids);
         }
     }
+    game.setInputNamers(keyCodeName, [&pad](int code) { return padCodeName(pad.dev, code); });
 
     while (running) {
         InputState in;
@@ -401,21 +470,23 @@ int main(int argc, char** argv) {
                     break;
 
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                    if (event.button.button == SDL_BUTTON_LEFT) {
-                        if (!mouseCaptured) {
-                            mouseCaptured = true;
-                            SDL_SetWindowRelativeMouseMode(window, true);
-                        } else {
-                            fireHeld = true;
-                        }
-                    } else if (event.button.button == SDL_BUTTON_RIGHT && mouseCaptured) {
-                        fire2Held = true;
+                    padActive = false;
+                    if (game.capturingInput()) {
+                        in.rawKey = sb::kMouseCodeBase + event.button.button;
+                        break;
+                    }
+                    if (event.button.button == SDL_BUTTON_LEFT && !mouseCaptured) {
+                        mouseCaptured = true;
+                        SDL_SetWindowRelativeMouseMode(window, true);
+                    } else if (mouseCaptured && event.button.button < 8) {
+                        mouseDown[event.button.button] = true;
+                        // A mouse button bound to a "press" action.
+                        keyEdges.push_back(sb::kMouseCodeBase + event.button.button);
                     }
                     break;
 
                 case SDL_EVENT_MOUSE_BUTTON_UP:
-                    if (event.button.button == SDL_BUTTON_LEFT) fireHeld = false;
-                    else if (event.button.button == SDL_BUTTON_RIGHT) fire2Held = false;
+                    if (event.button.button < 8) mouseDown[event.button.button] = false;
                     break;
 
                 case SDL_EVENT_MOUSE_WHEEL:
@@ -432,22 +503,40 @@ int main(int argc, char** argv) {
 
                 case SDL_EVENT_KEY_DOWN:
                     if (event.key.repeat) break;
+                    padActive = false;
+                    // The controls screen waiting for a key gets it raw, and
+                    // nothing else sees the press. Escape still cancels.
+                    if (game.capturingInput()) {
+                        if (event.key.key == SDLK_ESCAPE) game.optionsEscape();
+                        else in.rawKey = static_cast<int>(event.key.scancode);
+                        break;
+                    }
+                    // Rebindable "press" actions go by scancode; the menu
+                    // keys below stay fixed so a broken binding can never
+                    // lock the pilot out of the screen that fixes it.
+                    keyEdges.push_back(static_cast<int>(event.key.scancode));
                     switch (event.key.key) {
                         // Esc pauses in the field (it used to quit the game
                         // outright, mid-mission, on a key next to F1). Quit
                         // is Q from the pause screen, or Esc anywhere else.
                         case SDLK_ESCAPE:
-                            if (game.screen() == GameScreen::Playing) {
+                            if (game.optionsOpen()) {
+                                game.optionsEscape();
+                            } else if (game.screen() == GameScreen::Playing) {
                                 paused = !paused;
                                 game.setPaused(paused);
-                                if (paused) { fireHeld = false; fire2Held = false; }
+                                if (paused) for (bool& b : mouseDown) b = false;
                             } else {
                                 running = false;
                             }
                             break;
                         case SDLK_Q:
-                            if (paused) running = false;
-                            else in.ability[0] = true;      // legs
+                            if (paused && !game.optionsOpen()) running = false;
+                            break;
+                        case SDLK_O:
+                            // The controls screen, from any menu or the pause
+                            // banner - never mid-fight, O could be bound.
+                            if (game.screen() != GameScreen::Playing || paused) in.openOptions = true;
                             break;
                         // ---- menu and store navigation ----------------------
                         case SDLK_UP:     in.menuUp = true; break;
@@ -464,24 +553,8 @@ int main(int argc, char** argv) {
                         // In the workshop X still sells; in the field it is the
                         // first-person drive view, which the screen decides.
                         case SDLK_X:
-                            if (game.screen() == GameScreen::Store) in.menuSell = true;
-                            else in.toggleFpv = true;
+                            if (game.screen() == GameScreen::Store || game.optionsOpen()) in.menuSell = true;
                             break;
-                        case SDLK_E: in.ability[1] = true; break;   // engine
-                        case SDLK_R: in.ability[2] = true; break;   // armour
-                        case SDLK_F: in.ability[3] = true; break;   // sensor
-                        case SDLK_Z: in.cycleScope = true; break;   // gunner sight
-                        case SDLK_1: in.toggleMask |= 1; break;
-                        case SDLK_2: in.toggleMask |= 2; break;
-                        case SDLK_3: in.toggleMask |= 4; break;
-                        case SDLK_4: in.toggleMask |= 8; break;
-                        // 5-8 flip the matching mount between the left and
-                        // right trigger groups, in the field, no menu.
-                        case SDLK_5: in.toggleMask |= 16; break;
-                        case SDLK_6: in.toggleMask |= 32; break;
-                        case SDLK_7: in.toggleMask |= 64; break;
-                        case SDLK_8: in.toggleMask |= 128; break;
-                        case SDLK_M: audio.toggleMute(); break;
                         case SDLK_N: in.menuNewProfile = true; break;
                         case SDLK_COMMA:
                             audio.setSfxVolume(audio.sfxVolume() - 0.1f);
@@ -506,7 +579,6 @@ int main(int argc, char** argv) {
                         case SDLK_F8: crtEffect = !crtEffect; break;
                         case SDLK_F9:
                             supersample = (supersample % 3) + 1; resizeGrid(); break;
-                        case SDLK_H: in.toggleHud = true; break;
                         case SDLK_V:
                             in.toggleAscii = true;
                             pendingModeChange = true;
@@ -520,13 +592,12 @@ int main(int argc, char** argv) {
                         case SDLK_TAB:
                             // In the workshop this is the with/without preview
                             // toggle; everywhere else it releases the mouse.
-                            if (game.screen() == GameScreen::Store) {
+                            if (game.screen() == GameScreen::Store || game.optionsOpen()) {
                                 in.menuToggle = true;
                             } else {
                                 mouseCaptured = !mouseCaptured;
                                 SDL_SetWindowRelativeMouseMode(window, mouseCaptured);
-                                fireHeld = false;
-                                fire2Held = false;
+                                for (bool& b : mouseDown) b = false;
                             }
                             break;
                         case SDLK_F11:
@@ -557,23 +628,59 @@ int main(int argc, char** argv) {
         // OR against the scripted values rather than assigning, so --demo input
         // survives the keyboard poll.
         const bool* keys = SDL_GetKeyboardState(nullptr);
-        in.forward = in.forward || keys[SDL_SCANCODE_W];
-        in.back    = in.back    || keys[SDL_SCANCODE_S];
-        in.left    = in.left    || keys[SDL_SCANCODE_A];
-        in.right   = in.right   || keys[SDL_SCANCODE_D];
-        in.boost   = in.boost   || keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
-        in.fireHeld = in.fireHeld || (fireHeld && mouseCaptured);
-        in.fire2Held = fire2Held && mouseCaptured;
-        // Space is the charged jump in the field. In the workshop it is what
-        // sends you back out, which is why it is read as an edge there.
-        if (game.screen() == GameScreen::Store) {
-            const bool spaceNow = keys[SDL_SCANCODE_SPACE];
-            if (spaceNow && !spaceWasDown) in.menuDeploy = true;
-            spaceWasDown = spaceNow;
-        } else {
-            in.jumpHeld = in.jumpHeld || keys[SDL_SCANCODE_SPACE];
-            spaceWasDown = keys[SDL_SCANCODE_SPACE];
+        const Bindings& bind = game.bindings();
+        // A bound code is down: a scancode from the keyboard state, a mouse
+        // button from the tracked buttons (only while the cursor is captured,
+        // or clicking the window to grab it would fire the guns).
+        auto keyHeld = [&](Action a) {
+            const int code = bind.at(a).key;
+            if (code < 0) return false;
+            if (code >= sb::kMouseCodeBase)
+                return mouseCaptured && code - sb::kMouseCodeBase < 8 && mouseDown[code - sb::kMouseCodeBase];
+            return code < SDL_SCANCODE_COUNT && keys[code];
+        };
+        auto keyPressed = [&](Action a) {
+            const int code = bind.at(a).key;
+            if (code < 0) return false;
+            for (int c : keyEdges) if (c == code) return true;
+            return false;
+        };
+        const bool inFieldKb = game.screen() == GameScreen::Playing && !paused && !game.optionsOpen();
+        if (!game.optionsOpen()) {
+            in.forward = in.forward || keyHeld(Action::Forward);
+            in.back    = in.back    || keyHeld(Action::Back);
+            in.left    = in.left    || keyHeld(Action::StrafeLeft);
+            in.right   = in.right   || keyHeld(Action::StrafeRight);
+            in.boost   = in.boost   || keyHeld(Action::Boost);
+            in.fireHeld = in.fireHeld || keyHeld(Action::FireLeft);
+            in.fire2Held = in.fire2Held || keyHeld(Action::FireRight);
+            // Space is the charged jump in the field. In the workshop it is what
+            // sends you back out, which is why it is read as an edge there.
+            if (game.screen() == GameScreen::Store) {
+                const bool spaceNow = keys[SDL_SCANCODE_SPACE];
+                if (spaceNow && !spaceWasDown) in.menuDeploy = true;
+                spaceWasDown = spaceNow;
+            } else {
+                in.jumpHeld = in.jumpHeld || keyHeld(Action::Jump);
+                spaceWasDown = keys[SDL_SCANCODE_SPACE];
+            }
+            if (inFieldKb) {
+                for (int k = 0; k < 4; ++k)
+                    if (keyPressed(static_cast<Action>(static_cast<int>(Action::AbilityLegs) + k)))
+                        in.ability[k] = true;
+                if (keyPressed(Action::Scope)) in.cycleScope = true;
+                if (keyPressed(Action::ToggleView)) in.toggleFpv = true;
+                for (int k = 0; k < 4; ++k) {
+                    if (keyPressed(static_cast<Action>(static_cast<int>(Action::Mount1) + k)))
+                        in.toggleMask |= (1 << k);
+                    if (keyPressed(static_cast<Action>(static_cast<int>(Action::Group1) + k)))
+                        in.toggleMask |= (16 << k);
+                }
+            }
+            if (keyPressed(Action::ToggleHud)) in.toggleHud = true;
+            if (keyPressed(Action::Mute)) audio.toggleMute();
         }
+        keyEdges.clear();
 
         const Uint64 now = SDL_GetPerformanceCounter();
         const float dt = static_cast<float>(static_cast<double>(now - previous) / freq);
@@ -583,7 +690,7 @@ int main(int argc, char** argv) {
         if (pad.dev) {
             const GameScreen scr = game.screen();
             const bool inStore = scr == GameScreen::Store;
-            const bool inField = scr == GameScreen::Playing;
+            const bool inField = scr == GameScreen::Playing && !paused;
             // Sticks. Left drives; right looks. The look stick is a RATE, so
             // it is scaled by the frame time to mean degrees per second
             // rather than degrees per frame.
@@ -592,41 +699,97 @@ int main(int argc, char** argv) {
                         &lx, &ly, 0.18f, 1.3f);
             stickVector(pad.axis(SDL_GAMEPAD_AXIS_RIGHTX), pad.axis(SDL_GAMEPAD_AXIS_RIGHTY),
                         &rx, &ry, 0.14f, 1.8f);
-            in.moveX += lx;
-            in.moveY += ly;
-            // ~150 deg/s at full deflection, in the same units as the mouse.
-            const float lookPixelsPerSec = 2.6f / in.mouseSensitivity;
-            in.mouseDX += rx * lookPixelsPerSec * std::min(dt, 0.05f);
-            in.mouseDY += ry * lookPixelsPerSec * std::min(dt, 0.05f) * 0.8f;
-            // Triggers fire.
-            if (inField) {
-                if (pad.axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.35f) in.fireHeld = true;
-                if (pad.axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 0.35f) in.fire2Held = true;
-                // Cross: charged jump (held).
-                in.jumpHeld = in.jumpHeld || pad.held(SDL_GAMEPAD_BUTTON_SOUTH);
-                // Abilities: L1 legs, R1 engine, Square armour, Circle sensor.
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))  in.ability[0] = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) in.ability[1] = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_WEST))  in.ability[2] = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_EAST))  in.ability[3] = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_NORTH)) in.cycleScope = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_RIGHT_STICK)) in.toggleFpv = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_UP))    in.toggleMask |= 1;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.toggleMask |= 2;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_DOWN))  in.toggleMask |= 4;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_LEFT))  in.toggleMask |= 8;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_TOUCHPAD)) in.toggleHud = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_BACK)) audio.toggleMute();
+            if (std::fabs(lx) > 0.01f || std::fabs(ly) > 0.01f || std::fabs(rx) > 0.01f ||
+                std::fabs(ry) > 0.01f)
+                padActive = true;
+            // Edges for every button and trigger, once per frame, so a
+            // binding can ask about any of them without re-arming another.
+            bool btnEdge[SDL_GAMEPAD_BUTTON_COUNT] = {};
+            bool axisEdge[SDL_GAMEPAD_AXIS_COUNT] = {};
+            int rawPad = -1;
+            for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
+                btnEdge[b] = pad.pressed(static_cast<SDL_GamepadButton>(b));
+                if (btnEdge[b]) { padActive = true; if (rawPad < 0) rawPad = b; }
+            }
+            for (int a = SDL_GAMEPAD_AXIS_LEFT_TRIGGER; a <= SDL_GAMEPAD_AXIS_RIGHT_TRIGGER; ++a) {
+                const bool down = pad.axis(static_cast<SDL_GamepadAxis>(a)) > 0.35f;
+                axisEdge[a] = down && !axisWasDown[a];
+                axisWasDown[a] = down;
+                if (axisEdge[a]) { padActive = true; if (rawPad < 0) rawPad = sb::kPadAxisBase + a; }
+            }
+            auto padHeld = [&](Action a) {
+                const int code = bind.at(a).pad;
+                if (code < 0) return false;
+                if (code >= sb::kPadAxisBase)
+                    return pad.axis(static_cast<SDL_GamepadAxis>(code - sb::kPadAxisBase)) > 0.35f;
+                return code < SDL_GAMEPAD_BUTTON_COUNT && pad.held(static_cast<SDL_GamepadButton>(code));
+            };
+            auto padPressed = [&](Action a) {
+                const int code = bind.at(a).pad;
+                if (code < 0) return false;
+                if (code >= sb::kPadAxisBase)
+                    return code - sb::kPadAxisBase < SDL_GAMEPAD_AXIS_COUNT && axisEdge[code - sb::kPadAxisBase];
+                return code < SDL_GAMEPAD_BUTTON_COUNT && btnEdge[code];
+            };
+
+            if (game.capturingInput()) {
+                if (rawPad >= 0) in.rawPad = rawPad;
+                else if (btnEdge[SDL_GAMEPAD_BUTTON_EAST]) in.menuBack = true;
+            } else if (game.optionsOpen()) {
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_UP])    in.menuUp = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_DOWN])  in.menuDown = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_LEFT])  in.menuLeft = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_RIGHT]) in.menuRight = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_SOUTH]) in.menuConfirm = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_EAST])  in.menuBack = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_NORTH]) in.menuToggle = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_WEST])  in.menuSell = true;
+            } else if (inField) {
+                in.moveX += lx;
+                in.moveY += ly;
+                // ~150 deg/s at full deflection, in the same units as the mouse.
+                const float lookPixelsPerSec = 2.6f / in.mouseSensitivity;
+                in.mouseDX += rx * lookPixelsPerSec * std::min(dt, 0.05f);
+                in.mouseDY += ry * lookPixelsPerSec * std::min(dt, 0.05f) * 0.8f;
+                // Everything below follows the bindings. Defaults: L2 / R2
+                // fire group L / R, Cross jumps, L1 / R1 / Square / Circle
+                // the four systems, Triangle the sight, R3 the view, D-pad
+                // the mounts, touchpad the HUD, Share mute.
+                if (padHeld(Action::FireLeft)) in.fireHeld = true;
+                if (padHeld(Action::FireRight)) in.fire2Held = true;
+                in.jumpHeld = in.jumpHeld || padHeld(Action::Jump);
+                in.forward = in.forward || padHeld(Action::Forward);
+                in.back = in.back || padHeld(Action::Back);
+                in.left = in.left || padHeld(Action::StrafeLeft);
+                in.right = in.right || padHeld(Action::StrafeRight);
+                in.boost = in.boost || padHeld(Action::Boost);
+                for (int k = 0; k < 4; ++k)
+                    if (padPressed(static_cast<Action>(static_cast<int>(Action::AbilityLegs) + k)))
+                        in.ability[k] = true;
+                if (padPressed(Action::Scope)) in.cycleScope = true;
+                if (padPressed(Action::ToggleView)) in.toggleFpv = true;
+                for (int k = 0; k < 4; ++k) {
+                    if (padPressed(static_cast<Action>(static_cast<int>(Action::Mount1) + k)))
+                        in.toggleMask |= (1 << k);
+                    if (padPressed(static_cast<Action>(static_cast<int>(Action::Group1) + k)))
+                        in.toggleMask |= (16 << k);
+                }
+                if (padPressed(Action::ToggleHud)) in.toggleHud = true;
+                if (padPressed(Action::Mute)) audio.toggleMute();
                 // Options pauses.
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_START)) {
+                if (btnEdge[SDL_GAMEPAD_BUTTON_START]) {
                     paused = !paused;
                     game.setPaused(paused);
                 }
+            } else if (paused) {
+                // The pause banner: Options resumes, Share opens the controls.
+                if (btnEdge[SDL_GAMEPAD_BUTTON_START]) { paused = false; game.setPaused(false); }
+                if (btnEdge[SDL_GAMEPAD_BUTTON_BACK]) in.openOptions = true;
             } else if (inStore) {
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_UP))    in.menuUp = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_DOWN))  in.menuDown = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_LEFT))  in.menuLeft = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.menuRight = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_UP])    in.menuUp = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_DOWN])  in.menuDown = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_LEFT])  in.menuLeft = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_DPAD_RIGHT]) in.menuRight = true;
                 // The left stick navigates too, as a repeating D-pad.
                 static float stickRepeat = 0.0f;
                 stickRepeat -= dt;
@@ -641,27 +804,21 @@ int main(int argc, char** argv) {
                 } else {
                     stickRepeat = 0.0f;
                 }
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_SOUTH)) { in.menuConfirm = true; in.menuNext = true; }
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_EAST))  in.menuBack = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_NORTH)) in.menuToggle = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_WEST))  in.menuSell = true;
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_START)) in.menuDeploy = true;
-                // Keep the field-only edges fresh.
-                pad.pressed(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-                pad.pressed(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-                pad.pressed(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
-                pad.pressed(SDL_GAMEPAD_BUTTON_TOUCHPAD);
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_BACK)) audio.toggleMute();
+                if (btnEdge[SDL_GAMEPAD_BUTTON_SOUTH]) { in.menuConfirm = true; in.menuNext = true; }
+                if (btnEdge[SDL_GAMEPAD_BUTTON_EAST])  in.menuBack = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_NORTH]) in.menuToggle = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_WEST])  in.menuSell = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_START]) in.menuDeploy = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_BACK])  in.openOptions = true;
             } else {
-                // Briefing / result: Cross or Options continues.
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_SOUTH) || pad.pressed(SDL_GAMEPAD_BUTTON_START)) {
+                // Briefing / result: Cross or Options continues, Share opens
+                // the controls screen.
+                if (btnEdge[SDL_GAMEPAD_BUTTON_SOUTH] || btnEdge[SDL_GAMEPAD_BUTTON_START]) {
                     in.menuConfirm = true;
                     in.menuNext = true;
                 }
-                pad.pressed(SDL_GAMEPAD_BUTTON_EAST);
-                pad.pressed(SDL_GAMEPAD_BUTTON_NORTH);
-                pad.pressed(SDL_GAMEPAD_BUTTON_WEST);
-                if (pad.pressed(SDL_GAMEPAD_BUTTON_BACK)) audio.toggleMute();
+                if (btnEdge[SDL_GAMEPAD_BUTTON_BACK]) in.openOptions = true;
+                if (btnEdge[SDL_GAMEPAD_BUTTON_EAST]) in.menuBack = true;
             }
             // Hit feedback: a thump proportional to what just landed on the
             // hull, and a lighter buzz for the guns firing. SDL takes
@@ -679,9 +836,15 @@ int main(int argc, char** argv) {
         // Paused: the world stands still but the frame still draws, so the
         // pilot can look at the pause banner over the last view. A pause
         // that ends after a long wait must not hand the game a huge dt.
-        if (paused) {
+        in.padActive = padActive;
+        if (paused && !game.optionsOpen() && !in.openOptions) {
             InputState idle;
+            idle.padActive = padActive;
             game.update(0.0f, idle);
+        } else if (paused) {
+            // The controls screen over the pause banner: it needs the menu
+            // input, the world still needs to stand still.
+            game.update(0.0f, in);
         } else {
             game.update(dt, in);
         }

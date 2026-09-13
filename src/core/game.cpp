@@ -1,5 +1,10 @@
 #include "game.h"
 
+#include "combat.h"
+
+#include "led.h"
+
+#include <cctype>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -76,6 +81,7 @@ void Game::startMission() {
 
     mission_.begin(level_, profile_);
     render_ = mission_.world().arena().render;
+    baseRender_ = render_;
     cabinLayout_ = cabinLayoutFor(profile_.loadout);
     screen_ = GameScreen::Briefing;
     screenTimer_ = 0.0f;
@@ -127,7 +133,14 @@ void Game::applyDisplayToggles(const InputState& in) {
         ascii_.background = static_cast<Background>(cycle(static_cast<int>(ascii_.background),
                                                           static_cast<int>(Background::Count)));
     if (in.toggleAscii) asciiEnabled_ = !asciiEnabled_;
-    if (in.cycleScope) { scopeStage_ = (scopeStage_ + 1) % 3; if (scopeStage_) fpv_ = false; }
+    // The sight cycles off -> x2.5 -> x7 -> off and hands you back the view
+    // you were in when you raised it: raising the glass from the cabin and
+    // lowering it used to leave you outside the machine.
+    if (in.cycleScope) {
+        if (scopeStage_ == 0) fpvBeforeScope_ = fpv_;
+        scopeStage_ = (scopeStage_ + 1) % 3;
+        fpv_ = (scopeStage_ == 0) ? fpvBeforeScope_ : false;
+    }
     if (in.toggleFpv) { fpv_ = !fpv_; if (fpv_) scopeStage_ = 0; }
     if (in.toggleHud) hudVisible_ = !hudVisible_;
     if (in.toggleDither) ascii_.dither = !ascii_.dither;
@@ -218,6 +231,11 @@ MechInput Game::buildPlayerInput(const InputState& in) const {
         if (scopeStage_ > 0) mi.throttle = std::min(mi.throttle, 0.35f);
     }
     mi.sprint = in.boost;
+    // Looking DOWN and driving off a lip climbs down the face instead of
+    // walking off it. In the cabin a modest downward gaze is enough (the
+    // pilot is looking at the edge); outside, the orbit camera already sits
+    // above the machine, so it takes a deliberate steeper tilt.
+    mi.wantDescend = camPitch_ > (fpv_ ? 0.32f : 0.50f);
     mi.aimPoint = aimPoint_;
     if (leadValid_) {
         mi.assistPoint = leadPoint_;
@@ -264,7 +282,8 @@ void Game::updateAimAssist() {
     // is stronger; in the cabin and on the glass the pilot is expected to
     // do the work.
     const bool outside = !fpv_ && scopeStage_ == 0;
-    float bestScore = outside ? 0.9877f : 0.9962f;   // cos 9 deg / cos 5 deg
+    // 7 degrees outside (it was 9 and read as too strong), 5 inside.
+    float bestScore = outside ? 0.9925f : 0.9962f;   // cos 7 deg / cos 5 deg
     Vec3 tPos, tVel;
     bool have = false;
     for (size_t i = 1; i < mission_.mechs().size(); ++i) {
@@ -300,16 +319,15 @@ void Game::updateAimAssist() {
     const int rf = static_cast<int>(Ability::Rangefinder);
     if (p.stats().hasPassive[rf]) s += 0.20f * p.stats().passivePower[rf];
     if (outside) {
-        s += 0.22f;
+        s += 0.11f;
         // Shot tracking. The closer the reticle already is to the target,
-        // the harder the fire control finishes the job: inside about a
-        // degree and a half the round goes where the solution says, at four
-        // degrees you are on your own. This is what makes a near miss from
-        // the outside view a hit, without turning the gun into an aimbot
-        // for a reticle that is nowhere near.
+        // the harder the fire control finishes the job: inside a degree the
+        // round goes most of the way to the solution, at three degrees you
+        // are on your own. Halved from its first version (0.85 of the way
+        // to 0.92 inside 1.5 deg) - that read as an aimbot.
         const float err = std::acos(clampf(bestScore, -1.0f, 1.0f));
-        const float snap = clampf(1.0f - (err - deg2rad(1.5f)) / deg2rad(2.5f), 0.0f, 1.0f);
-        s = s + (0.92f - s) * snap * 0.85f;
+        const float snap = clampf(1.0f - (err - deg2rad(1.0f)) / deg2rad(2.0f), 0.0f, 1.0f);
+        s = s + (0.80f - s) * snap * 0.45f;
     }
     if (p.locked()) s = 0.95f;
     // A Jammer eats the fire control. Not all of it - the gun still points
@@ -638,8 +656,11 @@ void Game::emitAudio(float dt, const MechInput& mi) {
     }
 
     // ---- music intent ----------------------------------------------------
-    audio_.setMusicStyle(level_.musicStyle);
-    audio_.setBossFight(level_.bossMission);
+    // The workshop and the debrief get their own quiet theme; the briefing
+    // previews the mission's score.
+    const bool hangar = screen_ == GameScreen::Store || screen_ == GameScreen::MissionResult;
+    audio_.setMusicStyle(hangar ? 7 : level_.musicStyle);
+    audio_.setBossFight(level_.bossMission && !hangar);
     // The soundtrack follows the shape of the fight: how many hostiles are up,
     // how close the nearest one is, and how hurt you are.
     float heat = clampf(static_cast<float>(alive) / 4.0f, 0.0f, 1.0f);
@@ -664,6 +685,14 @@ void Game::update(float dt, const InputState& in) {
     if (in.menuUp || in.menuDown || in.menuLeft || in.menuRight)
         audio_.push(Sfx::UiMove, 0.7f);
     if (in.menuConfirm || in.menuDeploy) audio_.push(Sfx::UiConfirm, 0.8f);
+
+    padActive_ = in.padActive;
+    if (in.openOptions && !optionsOpen_) openOptions();
+    if (optionsOpen_) {
+        // The controls screen owns the input; the world stands still.
+        updateOptions(in);
+        return;
+    }
 
     switch (screen_) {
         case GameScreen::Briefing: {
@@ -810,7 +839,7 @@ void Game::updateCamera(float dt, const InputState& in) {
         // reticle from the outside view, the view turns a third slower, so
         // the aim stays on the machine that is jinking under it rather than
         // skating past. Only outside - in the cabin the sight is yours.
-        const float stick = (!fpv_ && scopeStage_ == 0 && leadValid_) ? 0.68f : 1.0f;
+        const float stick = (!fpv_ && scopeStage_ == 0 && leadValid_) ? 0.82f : 1.0f;
         camYaw_ += in.mouseDX * in.mouseSensitivity * fovScale * stick;
         camPitch_ = clampf(camPitch_ + in.mouseDY * in.mouseSensitivity * fovScale * stick,
                            kPitchMin, kPitchMax);
@@ -902,6 +931,20 @@ void Game::updateCamera(float dt, const InputState& in) {
             eye = transformPoint(pm.bodyMatrix(), Vec3(0.0f, 0.75f, 1.5f));
             fov = deg2rad(66.0f);
         }
+        // Never put the eye inside a wall. At a corner or a lip the bow can
+        // be buried in the face for a few frames, and from inside the slab
+        // the view is black. Pull the eye back along the line from the hull
+        // centre until it is clear.
+        {
+            const Vec3 centre = pm.position();
+            const Vec3 to = eye - centre;
+            const float len = length(to);
+            if (len > 0.05f) {
+                const SurfaceHit h = mission_.world().raycast(centre, to / len, len + 0.25f);
+                if (h.hit && h.distance < len + 0.25f)
+                    eye = centre + (to / len) * std::max(0.2f, h.distance - 0.25f);
+            }
+        }
         camPos_ = eye;
         camFocus_ = eye + offsetDir * 60.0f;
         if (shake_ > 0.001f) {
@@ -939,6 +982,27 @@ void Game::updateCamera(float dt, const InputState& in) {
 // ------------------------------------------------------------------- render
 
 void Game::renderScene() {
+    // The blackout: the sun goes, the fill goes, the fog closes in. What is
+    // left is the machine's own lamps (the ambient floor) and the radar.
+    {
+        const float k = clampf(mission_.blackout(), 0.0f, 1.0f);
+        if (k > 0.001f) {
+            const float lit = 1.0f - 0.88f * k;
+            render_.lightColor = baseRender_.lightColor * lit;
+            render_.fillColor = baseRender_.fillColor * lit;
+            render_.skyAmbient = baseRender_.skyAmbient * (1.0f - 0.65f * k);
+            render_.groundAmbient = baseRender_.groundAmbient * (1.0f + 0.5f * k);
+            render_.fogDensity = baseRender_.fogDensity * (1.0f + 1.6f * k);
+            render_.fogColor = baseRender_.fogColor * (1.0f - 0.7f * k);
+        } else {
+            render_.lightColor = baseRender_.lightColor;
+            render_.fillColor = baseRender_.fillColor;
+            render_.skyAmbient = baseRender_.skyAmbient;
+            render_.groundAmbient = baseRender_.groundAmbient;
+            render_.fogDensity = baseRender_.fogDensity;
+            render_.fogColor = baseRender_.fogColor;
+        }
+    }
     raster_.beginFrame(cam_, render_);
     if (screen_ == GameScreen::Store) {
         // The store renders its own little scene: two turntables parked far
@@ -965,6 +1029,10 @@ void Game::renderScene() {
             Vec3 sway(std::cos(w * 0.5f) * 0.010f * sf,
                       std::sin(w) * 0.014f * sf - (p.state() == MechState::Landing ? 0.05f : 0.0f),
                       0.0f);
+            // Kept for the text pass: the readouts are painted over the
+            // panels' projections, so they have to ride the same sway or
+            // they drift off their own instruments at walking pace.
+            cabinSway_ = sway;
             submitCabin(raster_, cam_, cabinLayout_, st, sway);
         }
     }
@@ -989,67 +1057,72 @@ void Game::render(AsciiFrame& out) {
     // The radar lives on the SCENE grid, not the coarse HUD grid: its cells
     // are painted as solid background-colour pixels, which is what makes it
     // read as an instrument screen rather than a box of letters.
-    if (screen_ == GameScreen::Playing && hudVisible_) drawPixelRadar(out);
+    if (screen_ == GameScreen::Playing && hudVisible_) {
+        drawPixelRadar(out);
+        // The console's legends live on the same grid as the radar, for the
+        // same reason: a whole scene cell per lamp is crisp, and the face's
+        // projection is what puts it where the instrument is.
+        if (inCabin()) drawCabinLamps(out);
+    }
 }
 
 void Game::drawPixelRadar(AsciiFrame& out) {
-    int rh = 32;                                    // 2:1 cells -> square map
-    // In the cabin the radar is the console's own scope: smaller, and sat
-    // where the scope bezel is drawn on the dashboard.
+    // The radar is painted on the SCENE grid rather than the coarse HUD
+    // grid: its cells are solid background colour, which is what makes it
+    // read as a lit screen instead of a box of letters. In the cabin it
+    // fills the console's centre panel exactly - the panel's bezel is the
+    // instrument's frame, so the display has no chrome of its own.
     const bool cabin = inCabin();
-    if (cabin) rh = std::min(rh, std::max(8, out.h * 2 / 9));
-    while ((out.w < rh * 2 + 4 || out.h < rh + 4) && rh > 12) rh -= 2;
-    const int rw = rh * 2;
-    if (out.w < rw + 4 || out.h < rh + 4) return;
-    int rx = out.w - rw - 2, ry = out.h - rh - 2;
+    int rx, ry, rw, rh;
     if (cabin) {
         CabinLayout lay = cabinLayout_;
         lay.resolve(cam_);
-        const Vec3 world = cam_.pos + cam_.right * lay.scope.x + cam_.up * lay.scope.y +
-                           cam_.forward * lay.scope.z;
-        const Vec4 clip = transform(cam_.viewProj, Vec4(world, 1.0f));
-        if (clip.w > 0.02f) {
-            const int cxp = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(out.w));
-            rx = std::max(1, std::min(out.w - rw - 1, cxp - rw / 2));
-        }
-        ry = out.h - rh - 1;
+        const Vec3 sway = cabinSway_;
+        auto proj = [&](const Vec3& local, float* sx, float* sy) {
+            const Vec3 world = cam_.pos + cam_.right * (local.x + sway.x) +
+                               cam_.up * (local.y + sway.y) +
+                               cam_.forward * (local.z + sway.z);
+            const Vec4 clip = transform(cam_.viewProj, Vec4(world, 1.0f));
+            if (clip.w < 0.02f) return false;
+            *sx = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(out.w);
+            *sy = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(out.h);
+            return true;
+        };
+        Vec3 c[4];
+        lay.dashC.corners(c);
+        float sx[4], sy[4];
+        for (int i = 0; i < 4; ++i)
+            if (!proj(c[i], &sx[i], &sy[i])) return;
+        const float x0 = std::max(sx[0], sx[3]), x1 = std::min(sx[1], sx[2]);
+        const float y0 = std::max(sy[0], sy[1]), y1 = std::min(sy[2], sy[3]);
+        rx = std::max(0, static_cast<int>(std::ceil(x0)));
+        ry = std::max(0, static_cast<int>(std::ceil(y0)));
+        rw = std::min(out.w - rx, static_cast<int>(x1) - rx);
+        rh = std::min(out.h - ry, static_cast<int>(y1) - ry);
+        if (rw < 12 || rh < 8) return;
+    } else {
+        rh = 32;                                    // 2:1 cells -> square map
+        while ((out.w < rh * 2 + 4 || out.h < rh + 4) && rh > 12) rh -= 2;
+        rw = rh * 2;
+        if (out.w < rw + 4 || out.h < rh + 4) return;
+        rx = out.w - rw - 2;
+        ry = out.h - rh - 2;
     }
-    const float range = 150.0f;                     // metres to the edge
+
+    const float range = 150.0f;                     // metres to the nearer edge
     const Mech& p = mission_.player();
     const Vec3 fwd = normalize(flattenY(camFocus_ - camPos_) + Vec3(0.0f, 0.0f, 1e-4f));
     // Screen right, same convention as lookAt: cross(forward, up).
     const Vec3 right = Vec3(-fwd.z, 0.0f, fwd.x);
 
-    // ---- terrain sweep, refreshed a few times a second -------------------
-    if (radarBg_.size() != static_cast<size_t>(rw * rh)) {
-        radarBg_.assign(static_cast<size_t>(rw * rh), Vec3(0.0f));
-        radarTick_ = 0;
-    }
-    if (radarTick_-- <= 0) {
-        radarTick_ = 8;
-        const World& w = mission_.world();
-        const float py = p.position().y;
-        for (int y = 0; y < rh; ++y)
-            for (int x = 0; x < rw; ++x) {
-                const float fx = (x + 0.5f) / rw * 2.0f - 1.0f;
-                const float fz = 1.0f - (y + 0.5f) / rh * 2.0f;
-                const Vec3 at = p.position() + right * (fx * range) + fwd * (fz * range);
-                Vec3 c;
-                const float hgt = w.terrain().height(at.x, at.z);
-                if (w.hasWater() && hgt < w.waterLevel()) {
-                    c = Vec3(0.05f, 0.10f, 0.16f);              // sea
-                } else if (w.insideSolid(Vec3(at.x, hgt + 1.6f, at.z), 0.4f) ||
-                           w.insideStructure(Vec3(at.x, hgt, at.z), 0.5f)) {
-                    c = Vec3(0.16f, 0.17f, 0.15f);              // built
-                } else {
-                    // Height relative to the machine, as a green ramp.
-                    const float rel = clampf((hgt - py) / 40.0f + 0.5f, 0.0f, 1.0f);
-                    c = lerp(Vec3(0.030f, 0.080f, 0.050f),
-                             Vec3(0.16f, 0.24f, 0.13f), rel);
-                }
-                radarBg_[static_cast<size_t>(y * rw + x)] = c;
-            }
-    }
+    // Cells per metre. The grid's cells are twice as tall as they are wide,
+    // so the two axes need different cell scales to put a circle on screen
+    // as a circle: pick the one that fits `range` in both directions and let
+    // the longer axis simply show more ground.
+    const float cx = static_cast<float>(rw) * 0.5f, cyf = static_cast<float>(rh) * 0.5f;
+    const float aspect = std::max(0.1f, cellAspect_);
+    const float sX = std::min(cx / range, (cyf / aspect) / range);
+    const float sY = sX * aspect;
 
     auto pix = [&](int x, int y, const Vec3& c) {
         if (x < 0 || y < 0 || x >= rw || y >= rh) return;
@@ -1061,27 +1134,180 @@ void Game::drawPixelRadar(AsciiFrame& out) {
         cell.bb = static_cast<uint8_t>(clampf(c.z, 0.0f, 1.0f) * 255.0f);
         if (cell.br == 0 && cell.bg == 0 && cell.bb == 0) cell.bg = 8;
     };
-    auto blip = [&](const Vec3& at, const Vec3& c, bool clampEdge) {
+    // Brighten whatever is already there, for the sweep's afterglow.
+    auto glow = [&](int x, int y, float k) {
+        if (x < 0 || y < 0 || x >= rw || y >= rh) return;
+        Cell& cell = out.at(rx + x, ry + y);
+        auto lift = [&](uint8_t v, float add) {
+            return static_cast<uint8_t>(clampf(static_cast<float>(v) + add, 0.0f, 255.0f));
+        };
+        cell.br = lift(cell.br, 26.0f * k);
+        cell.bg = lift(cell.bg, 64.0f * k);
+        cell.bb = lift(cell.bb, 30.0f * k);
+    };
+    // World position -> cell. Returns false when it lies off the screen and
+    // is not to be clamped to the rim.
+    auto plot = [&](const Vec3& at, bool clampEdge, int* ox, int* oy) {
         const Vec3 rel = flattenY(at - p.position());
-        float fx = dot(rel, right) / range;
-        float fz = dot(rel, fwd) / range;
-        const float m = std::max(std::fabs(fx), std::fabs(fz));
-        if (m > 0.96f) {
-            if (!clampEdge) return;
-            fx *= 0.96f / m;
-            fz *= 0.96f / m;
+        float fx = dot(rel, right) * sX;
+        float fz = dot(rel, fwd) * sY;
+        const float mx = cx - 1.0f, my = cyf - 1.0f;
+        if (std::fabs(fx) > mx || std::fabs(fz) > my) {
+            if (!clampEdge) return false;
+            const float k = std::min(mx / std::max(std::fabs(fx), 1e-3f),
+                                     my / std::max(std::fabs(fz), 1e-3f));
+            fx *= k;
+            fz *= k;
         }
-        const int x = static_cast<int>((fx * 0.5f + 0.5f) * rw);
-        const int y = static_cast<int>((0.5f - fz * 0.5f) * rh);
-        pix(x, y, c);
+        *ox = static_cast<int>(cx + fx);
+        *oy = static_cast<int>(cyf - fz);
+        return true;
+    };
+    auto blip = [&](const Vec3& at, const Vec3& c, bool clampEdge) {
+        int x, y;
+        if (plot(at, clampEdge, &x, &y)) pix(x, y, c);
     };
 
-    // Background.
+    // ---- the screen itself, refreshed a few times a second ---------------
+    // Terrain under a graticule: the ground as a green height ramp, water
+    // dark blue, anything built a flat grey, with range rings every fifty
+    // metres and cross-hairs on the machine's own axes. All of it is static
+    // in screen space, so it is baked into the same cache as the terrain.
+    if (radarBg_.size() != static_cast<size_t>(rw * rh)) {
+        radarBg_.assign(static_cast<size_t>(rw * rh), Vec3(0.0f));
+        radarTick_ = 0;
+    }
+    if (radarTick_-- <= 0) {
+        radarTick_ = 8;
+        const World& w = mission_.world();
+        const float py = p.position().y;
+        // The ground first, then the buildings STAMPED over it. Asking the
+        // world "is this point built on" once per radar cell meant a grid
+        // query and a walk of every major prop for each of a few thousand
+        // cells, which cost the best part of a tenth of a second every time
+        // the plot refreshed - a hitch every eight frames, and the worse the
+        // arena was built up the worse it got. Drawing the boxes onto the
+        // map instead is the same picture for the cost of the boxes.
+        for (int y = 0; y < rh; ++y)
+            for (int x = 0; x < rw; ++x) {
+                const float mx = (static_cast<float>(x) + 0.5f - cx) / sX;
+                const float mz = (cyf - static_cast<float>(y) - 0.5f) / sY;
+                const Vec3 at = p.position() + right * mx + fwd * mz;
+                Vec3 c;
+                const float hgt = w.terrain().height(at.x, at.z);
+                if (w.hasWater() && hgt < w.waterLevel()) {
+                    c = Vec3(0.04f, 0.07f, 0.13f);              // sea
+                } else {
+                    // Height relative to the machine, as a green ramp.
+                    const float rel = clampf((hgt - py) / 40.0f + 0.5f, 0.0f, 1.0f);
+                    c = lerp(Vec3(0.030f, 0.090f, 0.052f),
+                             Vec3(0.17f, 0.29f, 0.14f), rel);
+                }
+                // The graticule, etched over the ground: rings at fifty-metre
+                // steps and the two axes through the machine.
+                const float d = std::sqrt(mx * mx + mz * mz);
+                const float ringPitch = 50.0f;
+                const float ring = std::fabs(d - std::round(d / ringPitch) * ringPitch);
+                const float cellM = 1.0f / std::max(sX, 1e-3f);
+                if (d > ringPitch * 0.5f && ring < cellM * 0.55f)
+                    c = lerp(c, Vec3(0.10f, 0.30f, 0.16f), 0.55f);
+                if (std::fabs(mx) < cellM * 0.6f || std::fabs(mz) < cellM * 0.6f)
+                    c = lerp(c, Vec3(0.07f, 0.22f, 0.12f), 0.45f);
+                radarBg_[static_cast<size_t>(y * rw + x)] = c;
+            }
+        // ---- the built-up ground, stamped from the boxes themselves ------
+        const Vec3 built(0.20f, 0.22f, 0.19f);
+        const float reach = range * 1.7f;
+        // World XZ -> map cell. The inverse of the loop above, so a box lands
+        // exactly on the ground it stands on.
+        auto cellOf = [&](const Vec3& at, float* fx, float* fy) {
+            const Vec3 rel = flattenY(at - p.position());
+            *fx = cx + dot(rel, right) * sX;
+            *fy = cyf - dot(rel, fwd) * sY;
+        };
+        auto stampBox = [&](const Obstacle& ob) {
+            // Only what stands ON the ground: a roof deck twenty metres up
+            // is not something the plot should paint as a wall.
+            const float base = mission_.world().terrain().height(ob.center.x, ob.center.z);
+            if (ob.center.y - ob.half.y > base + 3.0f) return;
+            if (ob.center.y + ob.half.y < base + 0.6f) return;
+            const float r = std::sqrt(ob.half.x * ob.half.x + ob.half.z * ob.half.z);
+            float fx, fy;
+            cellOf(ob.center, &fx, &fy);
+            const int spanX = static_cast<int>(r * sX) + 1;
+            const int spanY = static_cast<int>(r * sY) + 1;
+            const int x0 = std::max(0, static_cast<int>(fx) - spanX);
+            const int x1 = std::min(rw - 1, static_cast<int>(fx) + spanX);
+            const int y0 = std::max(0, static_cast<int>(fy) - spanY);
+            const int y1 = std::min(rh - 1, static_cast<int>(fy) + spanY);
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) {
+                    const float mx = (static_cast<float>(x) + 0.5f - cx) / sX;
+                    const float mz = (cyf - static_cast<float>(y) - 0.5f) / sY;
+                    const Vec3 at = p.position() + right * mx + fwd * mz;
+                    const Vec3 l = ob.toLocal(Vec3(at.x, ob.center.y, at.z));
+                    if (std::fabs(l.x) > ob.half.x + 0.4f ||
+                        std::fabs(l.z) > ob.half.z + 0.4f) continue;
+                    radarBg_[static_cast<size_t>(y * rw + x)] = built;
+                }
+        };
+        for (const Obstacle& ob : w.obstacles()) {
+            if (!ob.active) continue;
+            if (std::fabs(ob.center.x - p.position().x) > reach ||
+                std::fabs(ob.center.z - p.position().z) > reach) continue;
+            stampBox(ob);
+        }
+        // A building's footprint, so a hollow ruin reads as a block rather
+        // than as four thin walls.
+        for (const PropInstance& prop : w.propInstances()) {
+            if (!prop.major || prop.hidden) continue;
+            if (std::fabs(prop.pos.x - p.position().x) > reach ||
+                std::fabs(prop.pos.z - p.position().z) > reach) continue;
+            float fx, fy;
+            cellOf(prop.pos, &fx, &fy);
+            const int spanX = static_cast<int>(prop.radius * sX) + 1;
+            const int spanY = static_cast<int>(prop.radius * sY) + 1;
+            const float rr = prop.radius * prop.radius;
+            for (int y = std::max(0, static_cast<int>(fy) - spanY);
+                 y <= std::min(rh - 1, static_cast<int>(fy) + spanY); ++y)
+                for (int x = std::max(0, static_cast<int>(fx) - spanX);
+                     x <= std::min(rw - 1, static_cast<int>(fx) + spanX); ++x) {
+                    const float mx = (static_cast<float>(x) + 0.5f - cx) / sX;
+                    const float mz = (cyf - static_cast<float>(y) - 0.5f) / sY;
+                    const Vec3 at = p.position() + right * mx + fwd * mz;
+                    const float dx = at.x - prop.pos.x, dz = at.z - prop.pos.z;
+                    if (dx * dx + dz * dz > rr) continue;
+                    radarBg_[static_cast<size_t>(y * rw + x)] = built;
+                }
+        }
+    }
     for (int y = 0; y < rh; ++y)
         for (int x = 0; x < rw; ++x)
             pix(x, y, radarBg_[static_cast<size_t>(y * rw + x)]);
 
-    // The route spur toward the current goal.
+    // ---- the sweep --------------------------------------------------------
+    // A bar of light going round the screen with a tail behind it. It tells
+    // the pilot at a glance that the set is live - a static plot reads as a
+    // picture, a sweeping one reads as an instrument listening.
+    {
+        const float sweep = std::fmod(elapsed_ * 1.9f, TAU);
+        const int tail = 22;
+        const float reach = std::sqrt(cx * cx + cyf * cyf);
+        for (int t = 0; t < tail; ++t) {
+            const float a = sweep - static_cast<float>(t) * 0.055f;
+            const float k = (1.0f - static_cast<float>(t) / tail);
+            const float sa = std::sin(a), ca = std::cos(a);
+            for (float d = 1.0f; d < reach; d += 0.7f) {
+                const int x = static_cast<int>(cx + sa * d);
+                const int y = static_cast<int>(cyf - ca * d * aspect);
+                glow(x, y, k * k * 0.55f);
+            }
+        }
+    }
+
+    // ---- the route --------------------------------------------------------
+    // A dotted spur toward whatever the contract wants next, and the mark
+    // itself blinking at the end of it.
     Vec3 goal = mission_.objectiveZone();
     float bestD = 1e18f;
     for (int idx : mission_.markedProps()) {
@@ -1101,15 +1327,22 @@ void Game::drawPixelRadar(AsciiFrame& out) {
         const float rl = length(rel);
         if (rl > 10.0f) {
             const Vec3 dir = rel / rl;
-            for (int stp = 1; stp <= 6; ++stp)
-                blip(p.position() + dir * (range * 0.14f * stp),
-                     Vec3(0.22f, 0.30f, 0.18f), false);
+            for (int stp = 1; stp <= 7; ++stp)
+                blip(p.position() + dir * (range * 0.12f * stp),
+                     Vec3(0.20f, 0.30f, 0.15f), false);
         }
-        if (std::fmod(elapsed_, 0.8f) < 0.55f)
-            blip(goal, Vec3(1.0f, 0.75f, 0.25f), true);
+        if (std::fmod(elapsed_, 0.8f) < 0.55f) {
+            int gx, gy;
+            if (plot(goal, true, &gx, &gy)) {
+                const Vec3 amber(1.0f, 0.75f, 0.25f);
+                pix(gx, gy, amber);
+                pix(gx - 1, gy, amber * 0.5f);
+                pix(gx + 1, gy, amber * 0.5f);
+            }
+        }
     }
 
-    // Contacts, painted over the map.
+    // ---- contacts ---------------------------------------------------------
     // Jamming eats the plot. Contacts drop out at random in proportion to how
     // hard you are being jammed, so the display flickers and thins rather than
     // switching off - a radar that is LYING to you reads very differently from
@@ -1120,9 +1353,10 @@ void Game::drawPixelRadar(AsciiFrame& out) {
         if (u.team() == Team::Player) { blip(u.position(), Vec3(0.3f, 0.9f, 0.4f), true); continue; }
         Vec3 c(0.85f, 0.45f, 0.25f);
         if (u.kind() == UnitKind::Tank) c = Vec3(1.0f, 0.35f, 0.2f);
-        if (u.kind() == UnitKind::Drone) c = Vec3(0.45f, 0.7f, 1.0f);
+        if (u.kind() == UnitKind::Drone || u.kind() == UnitKind::Gunship) c = Vec3(0.45f, 0.7f, 1.0f);
         if (u.kind() == UnitKind::Warden) c = Vec3(0.45f, 1.0f, 0.55f);
         if (u.kind() == UnitKind::Jammer) c = Vec3(0.75f, 0.55f, 1.0f);
+        if (u.kind() == UnitKind::ShieldPylon) c = Vec3(0.55f, 0.85f, 1.0f);
         // The jammer itself never hides: it is loud, and you are meant to be
         // able to go and find it.
         if (jam > 0.02f && u.kind() != UnitKind::Jammer) {
@@ -1133,19 +1367,42 @@ void Game::drawPixelRadar(AsciiFrame& out) {
         }
         blip(u.position(), c, false);
     }
+    // Hostile machines are the only contact worth two cells: they are the
+    // thing that kills you, and one cell at this scale is a speck.
     for (size_t i = 1; i < mission_.mechs().size(); ++i) {
         const Mech& m = mission_.mechs()[i];
         if (!m.alive()) continue;
-        blip(m.position(), Vec3(1.0f, 0.15f, 0.12f), true);
-        blip(m.position() + right * (range / rw * 2.0f), Vec3(1.0f, 0.15f, 0.12f), true);
+        int x, y;
+        if (!plot(m.position(), true, &x, &y)) continue;
+        const Vec3 red(1.0f, 0.15f, 0.12f);
+        pix(x, y, red);
+        pix(x + 1, y, red);
     }
 
-    // You, dead centre, as a glyph over the pixels.
-    putCell(out, rx + rw / 2, ry + rh / 2, '@', Vec3(1.0f, 1.0f, 1.0f));
+    // ---- the machine, dead centre -----------------------------------------
+    // A chevron pointing up the screen (the plot is always heading-up) with a
+    // short bore line ahead of it, so "which way am I looking" is answered by
+    // the instrument and not by memory.
+    {
+        const int mx = static_cast<int>(cx), my = static_cast<int>(cyf);
+        const Vec3 lit(0.85f, 1.0f, 0.88f);
+        for (int i = 1; i <= std::max(2, rh / 8); ++i)
+            pix(mx, my - i, Vec3(0.30f, 0.55f, 0.34f));
+        pix(mx, my, lit);
+        pix(mx - 1, my + 1, lit * 0.7f);
+        pix(mx + 1, my + 1, lit * 0.7f);
+    }
 
-    // Frame and label.
-    drawRect(out, rx - 1, ry - 1, rw + 2, rh + 2, kDim);
-    drawText(out, rx, ry - 1, "RADAR 150m", kDim);
+    // Frame and label. In the cabin the frame is the panel's own bezel and
+    // the range is etched at the bottom of the screen; outside, the radar is
+    // a floating box and needs its own.
+    if (!cabin) {
+        drawRect(out, rx - 1, ry - 1, rw + 2, rh + 2, kDim);
+        drawText(out, rx, ry - 1, "RADAR 150m", kDim);
+    } else if (rw > 22) {
+        const TextStyle etch{Vec3(0.22f, 0.45f, 0.26f), true};
+        drawText(out, rx + 1, ry + rh - 1, fmtInt(static_cast<int>(range)) + "m", etch);
+    }
 }
 
 void Game::drawHudOnly(AsciiFrame& out) {
@@ -1153,12 +1410,183 @@ void Game::drawHudOnly(AsciiFrame& out) {
     // buffers allocated across frames.
     for (Cell& c : out.cells) c = Cell{};
     if (hudVisible_) drawHud(out);
+    if (optionsOpen_) {
+        drawOptions(out);
+        return;
+    }
     if (paused_ && out.w >= 40 && out.h >= 10) {
         const int cx = out.w / 2, cy = out.h / 2;
-        fillPanel(out, cx - 19, cy - 2, 38, 5, Vec3(0.008f, 0.018f, 0.013f));
+        fillPanel(out, cx - 21, cy - 2, 42, 5, Vec3(0.008f, 0.018f, 0.013f));
         drawText(out, cx - 3, cy - 1, "PAUSED", kBright);
-        drawText(out, cx - 16, cy + 1, "ESC RESUME   Q QUIT TO DESKTOP", kDim);
+        drawText(out, cx - 19, cy + 1,
+                 padActive_ ? "OPTIONS RESUME   SHARE CONTROLS"
+                            : "ESC RESUME   O CONTROLS   Q QUIT", kDim);
     }
+}
+
+// ------------------------------------------------------------- controls
+
+void Game::loadBindings() {
+    bindings_.load("acah_controls.txt");
+}
+
+void Game::optionsEscape() {
+    if (!optionsOpen_) return;
+    if (optCapture_ != 0) optCapture_ = 0;
+    else optionsOpen_ = false;
+}
+
+std::string Game::keyLabel(int code) const {
+    if (code == kCodeNone) return "---";
+    if (code >= kMouseCodeBase) {
+        const int b = code - kMouseCodeBase;
+        return b == 1 ? "MOUSE L" : b == 2 ? "MOUSE M" : b == 3 ? "MOUSE R"
+                                  : "MOUSE " + fmtInt(b);
+    }
+    // The platform knows the keyboard layout and can do better; without one
+    // attached the core still letters its own cockpit plate.
+    if (keyNamer_) {
+        std::string n = keyNamer_(code);
+        for (char& c : n) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (!n.empty()) return n;
+    }
+    return defaultKeyName(code);
+}
+
+// The short form, for the places a binding is engraved on a panel rather
+// than listed in a table: "LMB" where the options screen says "MOUSE L".
+std::string Game::keyLabelShort(int code) const {
+    if (code >= kMouseCodeBase) return defaultKeyName(code);
+    const std::string full = keyLabel(code);
+    return full.size() > 5 ? defaultKeyName(code) : full;
+}
+
+std::string Game::padLabel(int code) const {
+    if (code == kCodeNone) return "---";
+    if (padNamer_) {
+        const std::string n = padNamer_(code);
+        if (!n.empty()) return n;
+    }
+    return defaultPadName(code);
+}
+
+std::string Game::actionLabel(Action a) const {
+    const ActionBinding& b = bindings_.at(a);
+    return padActive_ ? padLabel(b.pad) : keyLabel(b.key);
+}
+
+std::string Game::actionLabelShort(Action a) const {
+    const ActionBinding& b = bindings_.at(a);
+    return padActive_ ? padLabel(b.pad) : keyLabelShort(b.key);
+}
+
+std::string Game::hk(const char* key, int padCode) const {
+    return "[" + (padActive_ ? padLabel(padCode) : std::string(key)) + "]";
+}
+
+void Game::updateOptions(const InputState& in) {
+    const int rowsTotal = kActionCount + 2;      // + RESET, BACK
+    if (optCapture_ != 0) {
+        const Action a = static_cast<Action>(optCursor_);
+        if (in.menuBack) { optCapture_ = 0; return; }
+        if (optCapture_ == 1 && in.rawKey != kCodeNone) {
+            bindings_.setKey(a, in.rawKey);
+            bindings_.save("acah_controls.txt");
+            optCapture_ = 0;
+            audio_.push(Sfx::UiConfirm, 0.8f);
+        } else if (optCapture_ == 2 && in.rawPad != kCodeNone) {
+            bindings_.setPad(a, in.rawPad);
+            bindings_.save("acah_controls.txt");
+            optCapture_ = 0;
+            audio_.push(Sfx::UiConfirm, 0.8f);
+        }
+        return;
+    }
+    if (in.menuUp) optCursor_ = (optCursor_ + rowsTotal - 1) % rowsTotal;
+    if (in.menuDown) optCursor_ = (optCursor_ + 1) % rowsTotal;
+    // Left/right hop between the two columns of the table.
+    const int perCol = (kActionCount + 1) / 2;
+    if ((in.menuLeft || in.menuRight) && optCursor_ < kActionCount) {
+        const int other = (optCursor_ < perCol) ? optCursor_ + perCol : optCursor_ - perCol;
+        if (other < kActionCount) optCursor_ = other;
+    }
+    if (in.menuBack) { optionsOpen_ = false; return; }
+    if (optCursor_ == kActionCount) {              // RESET DEFAULTS
+        if (in.menuConfirm) {
+            bindings_.reset();
+            bindings_.save("acah_controls.txt");
+            audio_.push(Sfx::UiConfirm, 0.8f);
+        }
+        return;
+    }
+    if (optCursor_ == kActionCount + 1) {          // BACK
+        if (in.menuConfirm) optionsOpen_ = false;
+        return;
+    }
+    const Action a = static_cast<Action>(optCursor_);
+    // Confirm rebinds on the device the confirm came from; the toggle key
+    // rebinds the other one, so a keyboard user can still set pad buttons.
+    if (in.menuConfirm) optCapture_ = padActive_ ? 2 : 1;
+    else if (in.menuToggle) optCapture_ = padActive_ ? 1 : 2;
+    else if (in.menuSell) {
+        if (padActive_) bindings_.setPad(a, kCodeNone); else bindings_.setKey(a, kCodeNone);
+        bindings_.save("acah_controls.txt");
+    }
+}
+
+void Game::drawOptions(AsciiFrame& frame) {
+    const int W = frame.w, H = frame.h;
+    if (W < 60 || H < 20) return;
+    for (Cell& c : frame.cells) c = Cell{};
+    fillPanel(frame, 0, 0, W, H, Vec3(0.006f, 0.014f, 0.010f));
+    drawText(frame, 2, 1, "CONTROLS", kBright);
+    drawTextRight(frame, W - 2, 1, padActive_ ? "PAD" : "KEYBOARD", kDim);
+
+    // Two columns of actions: name, key, pad.
+    const int perCol = (kActionCount + 1) / 2;
+    const int colW = std::min(48, (W - 4) / 2);
+    const int nameW = std::max(12, colW - 24);
+    drawText(frame, 2 + nameW, 3, "KEY", kDim);
+    drawText(frame, 2 + nameW + 12, 3, "PAD", kDim);
+    if (2 + colW + nameW + 12 < W) {
+        drawText(frame, 2 + colW + nameW, 3, "KEY", kDim);
+        drawText(frame, 2 + colW + nameW + 12, 3, "PAD", kDim);
+    }
+    for (int i = 0; i < kActionCount; ++i) {
+        const int col = i / perCol;
+        const int x = 2 + col * colW;
+        const int y = 4 + (i % perCol);
+        if (y >= H - 4) break;
+        const bool cur = (i == optCursor_);
+        const Action a = static_cast<Action>(i);
+        const ActionBinding& b = bindings_.at(a);
+        std::string name = actionName(a);
+        if (static_cast<int>(name.size()) > nameW - 3) name = name.substr(0, static_cast<size_t>(nameW - 3));
+        drawText(frame, x, y, (cur ? "> " : "  ") + name, cur ? kBright : kNorm);
+        const bool capK = cur && optCapture_ == 1, capP = cur && optCapture_ == 2;
+        drawText(frame, x + nameW, y, capK ? "PRESS..." : keyLabel(b.key).substr(0, 11),
+                 capK ? kWarn : (cur ? kBright : kDim));
+        drawText(frame, x + nameW + 12, y, capP ? "PRESS..." : padLabel(b.pad).substr(0, 11),
+                 capP ? kWarn : (cur ? kBright : kDim));
+    }
+    const int ry = 4 + perCol + 1;
+    drawText(frame, 2, ry, std::string(optCursor_ == kActionCount ? "> " : "  ") + "RESET DEFAULTS",
+             optCursor_ == kActionCount ? kBright : kNorm);
+    drawText(frame, 2, ry + 1, std::string(optCursor_ == kActionCount + 1 ? "> " : "  ") + "BACK",
+             optCursor_ == kActionCount + 1 ? kBright : kNorm);
+
+    if (optCapture_ != 0) {
+        drawText(frame, 2, H - 2,
+                 optCapture_ == 1 ? "PRESS A KEY OR MOUSE BUTTON   [BKSP] CANCEL"
+                                  : "PRESS A PAD BUTTON OR TRIGGER   " + hk("BKSP", 1) + " CANCEL",
+                 kWarn);
+    } else {
+        drawText(frame, 2, H - 2,
+                 hk("ENTER", 0) + " REBIND  " + hk("TAB", 3) + " REBIND OTHER DEVICE  " +
+                     hk("X", 2) + " UNBIND  " + hk("BKSP", 1) + " BACK",
+                 kDim);
+    }
+    drawText(frame, 2, H - 1, "SAVED TO acah_controls.txt   MENUS ALWAYS USE ARROWS / ENTER / D-PAD", kDim);
 }
 
 void Game::hudGridFor(int availCols, int availRows, int* colsOut, int* rowsOut) {
@@ -1218,6 +1646,48 @@ void Game::drawCombatHud(AsciiFrame& frame) {
         putCell(frame, cx + 1, cy + 1, '\\', c);
     }
 
+    // ---- the fall of shot ------------------------------------------------
+    // Rounds drop, and how far they drop is what decides a gun's useful
+    // reach. The sight says where they will land: a mark under the reticle
+    // for the SLOWEST gun currently switched on (if that one arrives, the
+    // faster ones do), stepping further down the glass the further out the
+    // pilot is looking. Lay the mark on the target rather than the cross and
+    // the shot goes home - which is the whole skill a slow gun asks for.
+    {
+        float slow = 1e9f;
+        float grav = kShotGravity;
+        int slowIdx = -1;
+        for (size_t i = 0; i < p.weapons().size(); ++i) {
+            const MountedWeapon& mw = p.weapons()[i];
+            if (!mw.part || !mw.enabled) continue;
+            if (mw.part->weapon.projectileSpeed < slow) {
+                slow = mw.part->weapon.projectileSpeed;
+                grav = shotGravity(mw.part->weapon);
+                slowIdx = static_cast<int>(i);
+            }
+        }
+        const float dist = (slowIdx >= 0)
+                               ? length(aimPoint_ - p.muzzlePosition(slowIdx))
+                               : 0.0f;
+        if (slow < 1e8f && dist > 20.0f) {
+            const float drop = ballisticDrop(dist, slow, grav);
+            const Vec4 a = transform(cam_.viewProj, Vec4(aimPoint_, 1.0f));
+            const Vec4 b = transform(cam_.viewProj,
+                                     Vec4(aimPoint_ - Vec3(0.0f, drop, 0.0f), 1.0f));
+            if (a.w > 0.05f && b.w > 0.05f) {
+                const float ay = (0.5f - a.y / a.w * 0.5f) * static_cast<float>(H);
+                const float by = (0.5f - b.y / b.w * 0.5f) * static_cast<float>(H);
+                const int dy = static_cast<int>(by - ay + 0.5f);
+                if (dy >= 2 && cy + dy < H - 1) {
+                    const Vec3 amber(0.95f, 0.72f, 0.30f);
+                    putCell(frame, cx, cy + dy, '=', amber);
+                    putCell(frame, cx - 1, cy + dy, '.', amber * 0.6f);
+                    putCell(frame, cx + 1, cy + dy, '.', amber * 0.6f);
+                }
+            }
+        }
+    }
+
     // ---- fire-control lead marker ---------------------------------------
     // The sensor's answer to "where do I actually put the rounds": a red
     // cross at the intercept point for the current target. Put your reticle
@@ -1254,7 +1724,7 @@ void Game::drawCombatHud(AsciiFrame& frame) {
     // With no respawn, knowing you are one shell from losing the contract is
     // the most important thing the HUD can tell you. It also points at the
     // way out: amber salvage crates are the only repair there is.
-    if (p.healthFraction() < 0.30f && p.alive()) {
+    if (p.healthFraction() < 0.30f && p.alive() && !inCabin()) {
         const bool blinkOn = std::fmod(elapsed_, 0.7f) < 0.45f;
         if (blinkOn) drawText(frame, cx - 8, cy + 5, "STRUCTURE CRITICAL", kBad);
         drawText(frame, cx - 14, cy + 6, "FIND REPAIR SALVAGE (AMBER CRATES)", kDim);
@@ -1305,9 +1775,15 @@ void Game::drawCombatHud(AsciiFrame& frame) {
                     putCell(frame, px - 1, py - 1, '/', amber);
                     putCell(frame, px + 1, py - 1, '\\', amber);
                 }
-                const int dist = static_cast<int>(length(at - p.position()));
-                drawText(frame, px - 2, py - 2, fmtInt(dist) + "m",
-                         TextStyle{amber, false});
+                // The range in metres is a cockpit reading, not a sticker on
+                // the world: from inside the machine it belongs on the brow
+                // panel with the rest of the contract, and the diamond alone
+                // marks the spot.
+                if (!inCabin()) {
+                    const int dist = static_cast<int>(length(at - p.position()));
+                    drawText(frame, px - 2, py - 2, fmtInt(dist) + "m",
+                             TextStyle{amber, false});
+                }
             } else {
                 putCell(frame, px, py, 'v', amber * 0.8f);
             }
@@ -1373,7 +1849,8 @@ void Game::drawCombatHud(AsciiFrame& frame) {
                     const int dist = static_cast<int>(length(to));
                     drawText(frame, std::max(1, std::min(W - 8, ex - 1)),
                              std::max(0, std::min(H - 1, ey)),
-                             std::string(g) + fmtInt(dist) + "m",
+                             inCabin() ? std::string(g)
+                                       : std::string(g) + fmtInt(dist) + "m",
                              TextStyle{amber, false});
                 }
             };
@@ -1421,19 +1898,17 @@ void Game::drawCombatHud(AsciiFrame& frame) {
     }
 
     // Water: the one warning that ends runs.
-    if (p.wading() > 0.05f) {
+    if (p.wading() > 0.05f && !inCabin()) {
         const bool deep = p.wading() > 0.8f;
         drawText(frame, cx - 6, cy + 4, deep ? "!! FLOODING !!" : "WADING",
                  deep ? kBad : kWarn);
     }
 
-    // In the cabin the readouts are the console's own instruments (drawn as
-    // geometry in renderScene); the text pass only labels them. No side
-    // panels: the glass is for looking through.
-    if (inCabin()) {
-        drawCabinReadouts(frame);
-        return;
-    }
+    // In the cabin the console's readouts are its own instruments - lit
+    // gauges with lamp legends, drawn elsewhere - so all the HUD pass has
+    // left to do is the two plates in the brow. No side panels: the glass
+    // is for looking through.
+    if (inCabin()) { drawCabinBrow(frame); return; }
 
     // ---- left column: machine status -------------------------------------
     // The whole column sits on one dark panel. Per-glyph backing keeps text
@@ -1468,12 +1943,13 @@ void Game::drawCombatHud(AsciiFrame& frame) {
     // One ability per slot, each on its own key. Only fitted ones get a row,
     // so a bare build costs no screen space.
     {
-        static const char* keys[4] = {"[Q]", "[E]", "[R]", "[F]"};
         for (int slot = 0; slot < 4; ++slot) {
             if (p.slotAbility(slot) == Ability::None) continue;
             const bool engaged = p.abilityEngaged(slot);
             const bool ready = p.abilityReady(slot);
-            drawText(frame, 2, y, keys[slot], ready ? kBright : kDim);
+            const std::string keyLab = "[" +
+                actionLabel(static_cast<Action>(static_cast<int>(Action::AbilityLegs) + slot)).substr(0, 3) + "]";
+            drawText(frame, 2, y, keyLab, ready ? kBright : kDim);
             drawHorizontalBar(frame, 8, y, 18,
                               engaged ? 1.0f : 1.0f - p.abilityCooldownFraction(slot),
                               engaged ? kWarn : (ready ? kGood : kDim), kDim);
@@ -1581,8 +2057,30 @@ void Game::drawCombatHud(AsciiFrame& frame) {
                 case ObjectiveKind::Convoy:        how = "stop the column before it escapes"; break;
                 case ObjectiveKind::Blackout:      how = "drop the marked masts"; break;
                 case ObjectiveKind::Breakthrough:  how = "cross the line to the mark"; break;
+                case ObjectiveKind::KillUnits:
+                    how = obj->killKind == UnitKind::ShieldPylon ? "destroy the shield pylons - nothing near them can be hurt"
+                                                                 : "destroy the marked emplacements";
+                    break;
+                case ObjectiveKind::Outrun:        how = "the barrage is walking up behind you - beat it to the mark"; break;
             }
             if (*how) drawTextRight(frame, W - 2, ry++, how, kDim);
+            if (obj->gateHealth > 0.0f)
+                drawTextRight(frame, W - 2, ry++, "the gate is shielded while a pylon stands", kDim);
+            const std::string cs = mission_.eliteCallsign();
+            if (!cs.empty()) drawTextRight(frame, W - 2, ry++, "TARGET: " + cs, kWarn);
+            if (mission_.collapseCountdown() >= 0.0f)
+                drawTextRight(frame, W - 2, ry++,
+                              "CHARGES ARMED  T-" + fmt(mission_.collapseCountdown(), 0) + "  KEEP MOVING",
+                              kBad);
+            if (obj->kind == ObjectiveKind::Outrun) {
+                const float lead = dot(p.position(), mission_.missionAxisDir()) - mission_.barrageAlong();
+                drawTextRight(frame, W - 2, ry++,
+                              lead > 0.0f ? "BARRAGE " + fmtInt(static_cast<int>(lead)) + "m BEHIND"
+                                          : std::string("UNDER THE BARRAGE"),
+                              lead > 40.0f ? kWarn : kBad);
+            }
+            if (mission_.blackout() > 0.5f)
+                drawTextRight(frame, W - 2, ry++, "SECTOR DARK - RADAR ONLY", kDim);
         }
         if (mission_.objectiveTarget() > 0)
             drawTextRight(frame, W - 2, ry++,
@@ -1659,7 +2157,12 @@ void Game::drawCombatHud(AsciiFrame& frame) {
     // ---- bottom bar ------------------------------------------------------
     const std::string state = mechStateName(p.state());
     drawText(frame, 2, H - 2, state + "  " + fmt(p.speed(), 1) + " m/s", kDim);
-    drawText(frame, 2, H - 1, "[Z] SIGHT [X] DRIVE [Q/E/R/F] SYS [1-4] GUNS", kDim);
+    drawText(frame, 2, H - 1,
+             "[" + actionLabel(Action::Scope) + "] SIGHT [" + actionLabel(Action::ToggleView) +
+                 "] DRIVE [" + actionLabel(Action::AbilityLegs) + "/" + actionLabel(Action::AbilityEngine) +
+                 "/" + actionLabel(Action::AbilityArmor) + "/" + actionLabel(Action::AbilitySensor) +
+                 "] SYS [" + actionLabel(Action::Mount1) + "-" + actionLabel(Action::Mount4) + "] GUNS",
+             kDim);
     drawTextRight(frame, W - 2, H - 2,
                   std::string(paletteName(ascii_.palette)) + " | " +
                       rampName(ascii_.ramp) + " | " +
@@ -1678,113 +2181,133 @@ void Game::drawCombatHud(AsciiFrame& frame) {
 
 // ------------------------------------------------------------------- cabin
 
-void Game::drawCabinReadouts(AsciiFrame& frame) {
+// The brow over the windscreen carries the two readouts that are about the
+// job rather than about the machine - the control plate and the contract -
+// and those stay as text on the HUD grid, painted inside the projected
+// panels. It is the CONSOLE, under the glass, that had to stop being text:
+// see drawCabinLamps.
+void Game::drawCabinBrow(AsciiFrame& frame) {
     const int W = frame.w, H = frame.h;
     const Mech& p = mission_.player();
     CabinLayout lay = cabinLayout_;
     lay.resolve(cam_);
 
-    // A camera-space point (the cabin's own frame) to a HUD cell. The HUD
-    // grid and the scene grid both span the window, so clip space maps to
-    // either.
-    auto anchor = [&](const Vec3& local, int* px, int* py) {
-        const Vec3 world = cam_.pos + cam_.right * local.x + cam_.up * local.y +
-                           cam_.forward * local.z;
+    // Camera space - the cabin's own frame, body sway included - to a HUD
+    // cell, so the plates ride with the panelling.
+    const Vec3 sway = cabinSway_;
+    auto project = [&](const Vec3& local, float* sx, float* sy) {
+        const Vec3 world = cam_.pos + cam_.right * (local.x + sway.x) +
+                           cam_.up * (local.y + sway.y) +
+                           cam_.forward * (local.z + sway.z);
         const Vec4 clip = transform(cam_.viewProj, Vec4(world, 1.0f));
         if (clip.w < 0.02f) return false;
-        *px = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(W));
-        *py = static_cast<int>((0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(H));
+        *sx = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(W);
+        *sy = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(H);
         return true;
     };
-    int px, py;
+    // A panel's usable face, in cells: the INNER bounds of its projected
+    // quad, inset by a cell so text never rides up onto the bezel.
+    struct Face { int x = 0, y = 0, w = 0, h = 0; bool ok = false; };
+    auto faceOf = [&](const CabinPanel& panel) {
+        Vec3 c[4];
+        panel.corners(c);
+        float sx[4], sy[4];
+        Face f;
+        for (int i = 0; i < 4; ++i)
+            if (!project(c[i], &sx[i], &sy[i])) return f;
+        const float x0 = std::max(sx[0], sx[3]), x1 = std::min(sx[1], sx[2]);
+        const float y0 = std::max(sy[0], sy[1]), y1 = std::min(sy[2], sy[3]);
+        f.x = std::max(0, static_cast<int>(std::ceil(x0)) + 1);
+        f.y = std::max(0, static_cast<int>(std::ceil(y0)));
+        f.w = std::min(W - f.x, static_cast<int>(x1) - f.x);
+        f.h = std::min(H - f.y, static_cast<int>(y1) - f.y);
+        f.ok = f.w >= 10 && f.h >= 1;
+        return f;
+    };
+    auto line = [&](const Face& f, int row, int col, const std::string& s,
+                    const TextStyle& style) {
+        if (!f.ok || row < 0 || row >= f.h || col < 0 || col >= f.w) return;
+        const size_t room = static_cast<size_t>(f.w - col);
+        drawText(frame, f.x + col, f.y + row,
+                 s.size() > room ? s.substr(0, room) : s, style);
+    };
+    auto lineRight = [&](const Face& f, int row, const std::string& s,
+                         const TextStyle& style) {
+        if (!f.ok || row < 0 || row >= f.h) return;
+        const int col = f.w - static_cast<int>(s.size());
+        if (col < 0) return;
+        drawText(frame, f.x + col, f.y + row, s, style);
+    };
+    // Which way something is, as a clock face from where the pilot is looking.
+    auto clockTo = [&](const Vec3& to) {
+        const Vec3 flatF = normalize(flattenY(camOrbitDir_) + Vec3(0.0f, 0.0f, 1e-4f));
+        const Vec3 flatT = normalize(flattenY(to) + Vec3(0.0f, 0.0f, 1e-4f));
+        const float ang = std::atan2(cross(flatF, flatT).y, dot(flatF, flatT));
+        int c = static_cast<int>(std::round(ang / (PI / 6.0f)));
+        c = ((c % 12) + 12) % 12;
+        return c == 0 ? 12 : c;
+    };
 
-    // ---- hull / heat: numbers at the end of the lit bars -----------------
-    const float hpFrac = p.healthFraction();
-    const TextStyle& hpStyle = hpFrac < 0.25f ? kBad : (hpFrac < 0.55f ? kWarn : kGood);
-    if (anchor(lay.hullBar + Vec3(lay.barLen + 0.03f, 0.0f, 0.0f), &px, &py))
-        drawText(frame, px, py, "HULL " + fmtInt(static_cast<int>(p.health())), hpStyle);
-    if (anchor(lay.hullBar + Vec3(-0.06f, 0.0f, 0.0f), &px, &py))
-        drawText(frame, px - 2, py, "H", kDim);
-    const float heatFrac = clampf(p.heat() / std::max(p.stats().heatCapacity, 0.01f), 0.0f, 1.0f);
-    if (anchor(lay.heatBar + Vec3(lay.barLen + 0.03f, 0.0f, 0.0f), &px, &py))
-        drawText(frame, px, py, p.overheated() ? "OVERHEAT" : "HEAT",
-                 p.overheated() ? kBad : (heatFrac > 0.7f ? kWarn : kDim));
-    // Ability keys under their lamps.
+    // ---- brow left: the control plate -------------------------------------
+    // Read by looking for the KEY you are about to press, not for the word,
+    // so the key comes first on every entry. Built from the live bindings, so
+    // a rebound control relabels the plate the pilot is looking at.
     {
-        static const char* keys[4] = {"Q", "E", "R", "F"};
-        int k = 0;
-        for (int slot = 0; slot < 4; ++slot) {
-            if (p.slotAbility(slot) == Ability::None) continue;
-            const Vec3 at = lay.abilityLamps + Vec3(lay.lampPitch * static_cast<float>(k++), 0.0f, 0.0f);
-            if (!anchor(at, &px, &py)) continue;
-            const bool ready = p.abilityReady(slot);
-            const bool on = p.abilityEngaged(slot);
-            drawText(frame, px, py + 1, keys[slot], on ? kWarn : (ready ? kBright : kDim));
+        const Face f = faceOf(lay.browL);
+        auto k = [&](Action a) { return actionLabelShort(a); };
+        const std::pair<std::string, std::string> entries[] = {
+            {k(Action::Forward) + k(Action::StrafeLeft) + k(Action::Back) +
+                 k(Action::StrafeRight), "DRIVE"},
+            {k(Action::FireLeft) + "/" + k(Action::FireRight), "GUNS"},
+            {k(Action::AbilityLegs) + k(Action::AbilityEngine) + k(Action::AbilityArmor) +
+                 k(Action::AbilitySensor), "SYS"},
+            {k(Action::Mount1) + "-" + k(Action::Mount4), "MOUNTS"},
+            {k(Action::Jump), "JUMP"},
+            {k(Action::Boost), "BOOST"},
+            {k(Action::Scope), "SIGHT"},
+            {k(Action::ToggleView), "VIEW"},
+            {padActive_ ? padLabel(4) : std::string("O"), "CONTROLS"},
+        };
+        const int n = static_cast<int>(sizeof(entries) / sizeof(entries[0]));
+        size_t keyW = 0, labW = 0;
+        for (const auto& e : entries) {
+            keyW = std::max(keyW, e.first.size());
+            labW = std::max(labW, e.second.size());
         }
-        // The name of whichever is engaged, or the next one ready, beside them.
-        if (anchor(lay.abilityLamps + Vec3(lay.lampPitch * 4.2f, 0.0f, 0.0f), &px, &py)) {
-            for (int slot = 0; slot < 4; ++slot) {
-                if (p.slotAbility(slot) == Ability::None) continue;
-                if (p.abilityEngaged(slot)) {
-                    drawText(frame, px, py, abilityName(p.slotAbility(slot)), kWarn);
-                    break;
-                }
+        const int colW = static_cast<int>(keyW + labW) + 3;
+        if (f.ok && colW > 0) {
+            const int cols = std::max(1, std::min(4, f.w / colW));
+            const int rows = std::max(1, std::min(f.h, (n + cols - 1) / cols));
+            for (int i = 0; i < n; ++i) {
+                const int col = i / rows, row = i % rows;
+                if (col >= cols) break;
+                const int x = col * colW;
+                std::string key = entries[i].first;
+                key.resize(keyW, ' ');
+                line(f, row, x, key, kBright);
+                line(f, row, x + static_cast<int>(keyW) + 1, entries[i].second, kDim);
             }
         }
     }
-    // Climb / jump state beside its bar.
-    if (anchor(lay.jumpBar + Vec3(lay.barLen + 0.03f, 0.0f, 0.0f), &px, &py)) {
-        if (p.climbFraction() > 0.05f) drawText(frame, px, py, "CLIMB", kBright);
-        else if (p.jumpCharge() > 0.01f) drawText(frame, px, py, "JUMP", kWarn);
-    }
 
-    // ---- guns: a number under each lamp, the list on the console face ----
-    const std::vector<MountedWeapon>& ws = p.weapons();
-    int listX = 2, listY = H - 2;
-    if (anchor(lay.gunLamps, &px, &py)) { listX = px; listY = py + 1; }
-    for (size_t i = 0; i < ws.size() && i < 6; ++i) {
-        const Vec3 at = lay.gunLamps + Vec3(lay.lampPitch * static_cast<float>(i), 0.0f, 0.0f);
-        if (!anchor(at, &px, &py)) continue;
-        const MountedWeapon& w = ws[i];
-        const bool ready = w.part && w.enabled && w.cooldown <= 0.01f &&
-                           (w.part->weapon.ammo != AmmoKind::Limited || w.rounds > 0);
-        std::string t(1, static_cast<char>('1' + static_cast<int>(i)));
-        drawText(frame, px, py + 1, t, !w.enabled ? kDim : (ready ? kBright : kDim));
-    }
-    // The list: tag, name, ammo - one row per mount below the lamps, as far
-    // as the console face has rows.
+    // ---- brow right: the contract, and what is shooting at you ------------
     {
-        int y = listY + 1;
-        for (size_t i = 0; i < ws.size() && y < H; ++i, ++y) {
-            const MountedWeapon& w = ws[i];
-            if (!w.part) { drawText(frame, listX, y, "-- empty", kDim); continue; }
-            const WeaponDef& def = w.part->weapon;
-            std::string ammo;
-            switch (def.ammo) {
-                case AmmoKind::Unlimited: ammo = ""; break;
-                case AmmoKind::Cooldown:  ammo = w.cooldown > 0.01f ? fmt(w.cooldown, 1) + "s" : "RDY"; break;
-                case AmmoKind::Limited:   ammo = fmtInt(w.rounds) + "+" + fmtInt(w.reserve); break;
-            }
-            std::string name = w.part->name;
-            if (name.size() > 14) name = name.substr(0, 14);
-            std::string line = std::string(w.group == 0 ? "L " : "R ") + name;
-            if (!ammo.empty()) line += " " + ammo;
-            const bool dry = def.ammo == AmmoKind::Limited && w.rounds == 0 && w.reserve == 0;
-            drawText(frame, listX, y, line, !w.enabled ? kDim : (dry ? kBad : kNorm));
-        }
-    }
-
-    // ---- objective, on the right of the console --------------------------
-    if (anchor(lay.objectiveText, &px, &py)) {
-        int y = py;
-        const int x = std::min(px, W - 30);
+        const Face f = faceOf(lay.browR);
+        line(f, 0, 0, level_.name, kBright);
+        lineRight(f, 0, money(profile_.cash + mission_.cashEarned()) + " CR", kDim);
         if (const ObjectiveSpec* obj = mission_.currentObjective()) {
-            drawText(frame, x, y++, obj->label, kBright);
-            std::string sub;
+            line(f, 1, 0, fmtInt(mission_.objectiveIndex() + 1) + "/" +
+                          fmtInt(mission_.objectiveCount()) + " " + obj->label, kWarn);
+            std::string right;
             if (mission_.objectiveTarget() > 0)
-                sub = fmtInt(mission_.objectiveProgress()) + "/" + fmtInt(mission_.objectiveTarget()) + " ";
+                right += fmtInt(mission_.objectiveProgress()) + "/" +
+                         fmtInt(mission_.objectiveTarget());
             if (obj->timer > 0.0f)
-                sub += "T-" + fmt(std::max(0.0f, mission_.objectiveTimer()), 0) + " ";
+                right += (right.empty() ? "" : "  ") + std::string("T-") +
+                         fmt(std::max(0.0f, mission_.objectiveTimer()), 0);
+            const std::string cs = mission_.eliteCallsign();
+            if (!cs.empty()) right = cs + (right.empty() ? "" : "  ") + right;
+            if (!right.empty()) lineRight(f, 1, right, kNorm);
             const bool zoneKind = obj->kind != ObjectiveKind::Convoy &&
                                   obj->kind != ObjectiveKind::Rampage &&
                                   obj->kind != ObjectiveKind::DestroyMarked &&
@@ -1792,52 +2315,315 @@ void Game::drawCabinReadouts(AsciiFrame& frame) {
                                   obj->kind != ObjectiveKind::Blackout;
             if (zoneKind) {
                 const Vec3 to = mission_.objectiveZone() - p.position();
-                const Vec3 flatF = normalize(flattenY(camOrbitDir_) + Vec3(0.0f, 0.0f, 1e-4f));
-                const Vec3 flatT = normalize(flattenY(to) + Vec3(0.0f, 0.0f, 1e-4f));
-                const float ang = std::atan2(cross(flatF, flatT).y, dot(flatF, flatT));
-                int clock = static_cast<int>(std::round(ang / (PI / 6.0f)));
-                clock = ((clock % 12) + 12) % 12;
-                if (clock == 0) clock = 12;
-                sub += "MARK " + fmtInt(clock) + " O'C " + fmtInt(static_cast<int>(length(flattenY(to)))) + "m";
+                line(f, 2, 0, "MARK " + fmtInt(clockTo(to)) + " O'C " +
+                              fmtInt(static_cast<int>(length(flattenY(to)))) + "m", kNorm);
             }
-            if (!sub.empty() && y < H) drawText(frame, x, y++, sub, kNorm);
-            if (mission_.jamStrength() > 0.02f && y < H)
-                drawText(frame, x, y++, mission_.jamStrength() > 0.55f ? "! JAMMED" : "! SIGNAL DEGRADED", kBad);
-            if (mission_.alarmLevel() > 0.05f && y < H)
-                drawText(frame, x, y++, mission_.alarmLevel() > 0.6f ? "ALARM HIGH" : "ALARM RISING",
-                         mission_.alarmLevel() > 0.6f ? kBad : kWarn);
         }
-    }
-
-    // ---- contact lamp label and the count ---------------------------------
-    {
-        int hostiles = mission_.enemiesAlive();
-        for (const Unit& u : mission_.units())
-            if (u.alive() && u.team() == Team::Hostile) ++hostiles;
-        if (anchor(lay.threatLamp + Vec3(0.05f, 0.0f, 0.0f), &px, &py)) {
-            const Mech* e = mission_.nearestEnemy();
+        // Contacts: how many, and where the nearest machine is.
+        {
+            int hostiles = mission_.enemiesAlive();
+            for (const Unit& u : mission_.units())
+                if (u.alive() && u.team() == Team::Hostile) ++hostiles;
             std::string t = fmtInt(hostiles) + " HOSTILE";
-            if (e) {
+            if (const Mech* e = mission_.nearestEnemy()) {
                 const Vec3 to = e->position() - p.position();
-                const Vec3 flatF = normalize(flattenY(camOrbitDir_) + Vec3(0.0f, 0.0f, 1e-4f));
-                const Vec3 flatT = normalize(flattenY(to) + Vec3(0.0f, 0.0f, 1e-4f));
-                const float ang = std::atan2(cross(flatF, flatT).y, dot(flatF, flatT));
-                int clock = static_cast<int>(std::round(ang / (PI / 6.0f)));
-                clock = ((clock % 12) + 12) % 12;
-                if (clock == 0) clock = 12;
-                t += "  MECH " + fmtInt(clock) + " O'C " + fmtInt(static_cast<int>(length(to))) + "m";
+                t += "  MECH " + fmtInt(clockTo(to)) + " O'C " +
+                     fmtInt(static_cast<int>(length(to))) + "m";
                 if (e->onWall()) t += " UP";
             }
-            drawText(frame, px, py, t, hostiles > 0 ? kWarn : kGood);
+            lineRight(f, f.h > 2 ? 2 : 1, t, hostiles > 0 ? kWarn : kGood);
+        }
+        // Whatever is currently going wrong takes the bottom row.
+        {
+            std::string w;
+            const TextStyle* ws = &kWarn;
+            if (mission_.collapseCountdown() >= 0.0f) {
+                w = "CHARGES ARMED T-" + fmt(mission_.collapseCountdown(), 0) + " KEEP MOVING";
+                ws = &kBad;
+            } else if (const ObjectiveSpec* o2 = mission_.currentObjective()) {
+                if (o2->kind == ObjectiveKind::Outrun) {
+                    const float lead = dot(p.position(), mission_.missionAxisDir()) -
+                                       mission_.barrageAlong();
+                    w = lead > 0.0f ? "BARRAGE " + fmtInt(static_cast<int>(lead)) + "m BEHIND"
+                                    : std::string("UNDER THE BARRAGE");
+                    ws = lead > 40.0f ? &kWarn : &kBad;
+                }
+            }
+            if (w.empty() && p.wading() > 0.05f) {
+                w = p.wading() > 0.8f ? "!! FLOODING !!" : "WADING";
+                ws = p.wading() > 0.8f ? &kBad : &kWarn;
+            }
+            if (w.empty() && p.healthFraction() < 0.30f && p.alive()) {
+                w = "STRUCTURE CRITICAL - FIND AMBER SALVAGE";
+                ws = &kBad;
+            }
+            if (w.empty() && mission_.jamStrength() > 0.02f) {
+                w = mission_.jamStrength() > 0.55f ? "JAMMED" : "SIGNAL DEGRADED";
+                ws = &kBad;
+            }
+            if (w.empty() && mission_.blackout() > 0.5f) {
+                w = "SECTOR DARK - RADAR ONLY";
+                ws = &kDim;
+            }
+            if (w.empty() && mission_.alarmLevel() > 0.05f) {
+                w = mission_.alarmLevel() > 0.6f ? "ALARM HIGH" : "ALARM RISING";
+                ws = mission_.alarmLevel() > 0.6f ? &kBad : &kWarn;
+            }
+            if (!w.empty()) line(f, f.h > 3 ? 3 : 2, 0, w, *ws);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- the lamps
+//
+// The console's legends, drawn as LAMPS on the SCENE grid - the same trick
+// the radar uses. Each dot of a 3x5 matrix character is a whole scene cell
+// painted solid, so the lettering is exactly as crisp as HUD text is, while
+// its POSITION comes from projecting the instrument face: it leans, slides
+// and sways with the console it is bolted to instead of snapping around on
+// the coarse HUD grid a third of the way across the screen.
+void Game::drawCabinLamps(AsciiFrame& out) {
+    const Mech& p = mission_.player();
+    CabinLayout lay = cabinLayout_;
+    lay.resolve(cam_);
+    const Vec3 sway = cabinSway_;
+    const int W = out.w, H = out.h;
+    auto project = [&](const Vec3& local, float* sx, float* sy) {
+        const Vec3 world = cam_.pos + cam_.right * (local.x + sway.x) +
+                           cam_.up * (local.y + sway.y) +
+                           cam_.forward * (local.z + sway.z);
+        const Vec4 clip = transform(cam_.viewProj, Vec4(world, 1.0f));
+        if (clip.w < 0.02f) return false;
+        *sx = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(W);
+        *sy = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(H);
+        return true;
+    };
+    // A face, in scene cells: the inner bounds of its projected quad.
+    struct Face {
+        float x0 = 0.0f, x1 = 0.0f, yTop = 0.0f, yBot = 0.0f;
+        bool ok = false;
+        float x(float u) const { return x0 + (u + 1.0f) * 0.5f * (x1 - x0); }
+        float y(float v) const { return yBot - (v + 1.0f) * 0.5f * (yBot - yTop); }
+        float w() const { return x1 - x0; }
+        float h() const { return yBot - yTop; }
+    };
+    auto faceOf = [&](const CabinPanel& panel) {
+        Vec3 c[4];
+        panel.corners(c);
+        float sx[4], sy[4];
+        Face f;
+        for (int i = 0; i < 4; ++i)
+            if (!project(c[i], &sx[i], &sy[i])) return f;
+        f.x0 = std::max(sx[0], sx[3]);
+        f.x1 = std::min(sx[1], sx[2]);
+        f.yTop = std::max(sy[0], sy[1]);
+        f.yBot = std::min(sy[2], sy[3]);
+        f.ok = f.w() > 24.0f && f.h() > 10.0f;
+        return f;
+    };
+    // One lit bulb: a block of whole cells, painted as background colour the
+    // way the radar paints its screen. Whole cells are the entire point - a
+    // lamp that lands across a cell boundary splits its light between two
+    // characters and the legend turns to mud.
+    auto bulb = [&](int px, int py, int dw, int dh, const Vec3& c) {
+        for (int yy = 0; yy < dh; ++yy)
+            for (int xx = 0; xx < dw; ++xx) {
+                const int x = px + xx, y = py + yy;
+                if (x < 0 || y < 0 || x >= W || y >= H) continue;
+                Cell& cell = out.at(x, y);
+                cell.ch = ' ';
+                cell.r = cell.g = cell.b = 0;
+                cell.br = static_cast<uint8_t>(clampf(c.x, 0.0f, 1.0f) * 255.0f);
+                cell.bg = static_cast<uint8_t>(clampf(c.y, 0.0f, 1.0f) * 255.0f);
+                cell.bb = static_cast<uint8_t>(clampf(c.z, 0.0f, 1.0f) * 255.0f);
+                if (!(cell.br | cell.bg | cell.bb)) cell.bg = 8;
+            }
+    };
+
+    // Lamp colours. These are what a lit bulb looks like, not palette
+    // entries: the console is a dark place and a legend is meant to glow.
+    const Vec3 cLabel(0.34f, 0.62f, 0.48f);
+    const Vec3 cNorm(0.52f, 0.96f, 0.66f);
+    const Vec3 cBright(0.80f, 1.00f, 0.88f);
+    const Vec3 cGood(0.46f, 1.00f, 0.56f);
+    const Vec3 cWarn(1.00f, 0.76f, 0.30f);
+    const Vec3 cBad(1.00f, 0.40f, 0.32f);
+    const Vec3 cCool(0.50f, 0.80f, 1.00f);
+
+    // How big a bulb is on a given face: as large as the face's height will
+    // allow `rows` lines of five bulbs and a gap, never smaller than one
+    // cell. A bulb is twice as wide as it is tall in CELLS, which is square
+    // in pixels, so the letterforms keep their proportions.
+    struct Grid { int dw = 2, dh = 1, adv = 7; };
+    auto gridFor = [](const Face& f, int rows) {
+        Grid g;
+        const int unit = std::max(1, static_cast<int>(f.h()) /
+                                         std::max(1, rows * (kLedGlyphH + 1)));
+        g.dh = unit;
+        g.dw = unit * 2;
+        g.adv = g.dw * kLedGlyphW + unit;    // one unit of daylight between
+        return g;
+    };
+    // A legend, laid down from a face coordinate. `align` is -1 for the left
+    // edge at u, +1 for the right edge at u. Anything that would not fit
+    // between `uMin` and `uMax` is simply not shown: a console legend never
+    // spills over the instrument next to it.
+    auto lamps = [&](const Face& f, const Grid& g, float u, float v, int align,
+                     const std::string& text, const Vec3& colour,
+                     float uMin, float uMax) {
+        if (!f.ok || text.empty()) return;
+        const int len = static_cast<int>(text.size());
+        const float wide = static_cast<float>(len * g.adv - g.dh);
+        float x = f.x(u);
+        if (align > 0) x -= wide;
+        const float lo = f.x(uMin), hi = f.x(uMax);
+        if (x < lo) x = lo;
+        if (x + wide > hi) return;
+        const int px = static_cast<int>(x + 0.5f);
+        const int py = static_cast<int>(f.y(v) + 0.5f) -
+                       (kLedGlyphH * g.dh) / 2;
+        for (int i = 0; i < len; ++i) {
+            const uint8_t* gl = ledGlyph(text[static_cast<size_t>(i)]);
+            for (int gy = 0; gy < kLedGlyphH; ++gy) {
+                if (gl[gy] == 0) continue;
+                for (int gx = 0; gx < kLedGlyphW; ++gx) {
+                    if (((gl[gy] >> (kLedGlyphW - 1 - gx)) & 1) == 0) continue;
+                    bulb(px + i * g.adv + gx * g.dw, py + gy * g.dh,
+                         g.dw, g.dh, colour);
+                }
+            }
+        }
+    };
+    // How many characters fit between two face coordinates.
+    auto room = [](const Face& f, const Grid& g, float u0, float u1) {
+        const float span = (u1 - u0) * 0.5f * f.w();
+        return std::max(0, static_cast<int>((span + static_cast<float>(g.dh)) /
+                                            static_cast<float>(g.adv)));
+    };
+    auto fit = [](std::string s, int chars) {
+        if (chars <= 0) return std::string();
+        if (static_cast<int>(s.size()) > chars) s.resize(static_cast<size_t>(chars));
+        return s;
+    };
+
+    // The face coordinates the console's fittings are laid out on. These
+    // match cabin.cpp's instrument pass exactly; if one moves the other has
+    // to move with it, which is why they are named the same thing in both.
+    const float uLab0 = -0.97f, uLab1 = -0.50f;
+    const float uNum0 = 0.42f, uNum1 = 0.97f;
+
+    // ---- console left: structure, heat, and the systems fitted -----------
+    {
+        const Face f = faceOf(lay.dashL);
+        int abilities = 0;
+        for (int slot = 0; slot < 4; ++slot)
+            if (p.slotAbility(slot) != Ability::None) ++abilities;
+        const int n = cabinRowCount(2 + abilities);
+        const Grid g = gridFor(f, n);
+        const int labW = room(f, g, uLab0, uLab1);
+        const int numW = room(f, g, uNum0, uNum1);
+
+        const float hpFrac = p.healthFraction();
+        const Vec3 hpc = hpFrac < 0.25f ? cBad : (hpFrac < 0.55f ? cWarn : cGood);
+        float v = cabinRowV(0, n);
+        lamps(f, g, uLab0, v, -1, fit("HULL", labW), cLabel, uLab0, uLab1);
+        lamps(f, g, uNum1, v, 1, fit(fmtInt(static_cast<int>(p.health())), numW),
+              hpc, uNum0, uNum1);
+
+        const float heatFrac = clampf(p.heat() / std::max(p.stats().heatCapacity, 0.01f),
+                                      0.0f, 1.0f);
+        const Vec3 htc = p.overheated() ? cBad : (heatFrac > 0.7f ? cWarn : cCool);
+        v = cabinRowV(1, n);
+        lamps(f, g, uLab0, v, -1, fit("HEAT", labW), cLabel, uLab0, uLab1);
+        lamps(f, g, uNum1, v, 1,
+              fit(p.overheated() ? std::string("OVR")
+                                 : fmtInt(static_cast<int>(heatFrac * 100.0f + 0.5f)),
+                  numW),
+              htc, uNum0, uNum1);
+
+        // One line per system this machine carries, against its own lamp.
+        // The key it answers to leads the line, because a system nobody can
+        // find the button for is not fitted in any useful sense.
+        int k = 0;
+        for (int slot = 0; slot < 4 && 2 + k < n; ++slot) {
+            if (p.slotAbility(slot) == Ability::None) continue;
+            v = cabinRowV(2 + k, n);
+            const bool on = p.abilityEngaged(slot), ready = p.abilityReady(slot);
+            const Vec3 c = on ? cWarn : (ready ? cBright : cLabel);
+            const std::string key = actionLabelShort(
+                static_cast<Action>(static_cast<int>(Action::AbilityLegs) + slot));
+            const std::string status =
+                on ? std::string("ON") : ready ? std::string("RDY")
+                                               : fmt(p.abilityCooldownSeconds(slot), 0);
+            lamps(f, g, uNum1, v, 1, fit(status, numW), c, uNum0, uNum1);
+            lamps(f, g, -0.78f, v, -1,
+                  fit(key + " " + abilityName(p.slotAbility(slot)),
+                      room(f, g, -0.78f, uNum0 - 0.04f)),
+                  c, -0.78f, uNum0 - 0.04f);
+            ++k;
         }
     }
 
-    // ---- the few things that belong on the glass --------------------------
-    drawTextRight(frame, W - 2, 0, money(profile_.cash + mission_.cashEarned()) + " cr", kDim);
-    drawText(frame, 2, 0, level_.name, kDim);
-    drawText(frame, 2, H - 1, "[X] EXTERNAL VIEW  [Z] SIGHT", kDim);
-    drawTextRight(frame, W - 2, H - 1, fmt(p.speed(), 1) + " m/s  " +
-                  fmt(frameMs_ > 0.0f ? 1000.0f / frameMs_ : 0.0f, 0) + " FPS", kDim);
+    // ---- console right: the drive and the guns ---------------------------
+    {
+        const Face f = faceOf(lay.dashR);
+        const std::vector<MountedWeapon>& ws = p.weapons();
+        std::vector<int> fitted;
+        for (size_t i = 0; i < ws.size() && fitted.size() < 6; ++i)
+            if (ws[i].part) fitted.push_back(static_cast<int>(i));
+        const int guns = static_cast<int>(fitted.size());
+        const int n = cabinRowCount(2 + guns);
+        const Grid g = gridFor(f, n);
+        const int labW = room(f, g, uLab0, uLab1);
+        const int numW = room(f, g, uNum0, uNum1);
+
+        // The speedometer, which is a fitting like everything else: a lit
+        // dial on the panel with its own digits in a sunk window.
+        float v = cabinRowV(0, n);
+        lamps(f, g, uLab0, v, -1, fit("SPD", labW), cLabel, uLab0, uLab1);
+        lamps(f, g, uNum1, v, 1, fit(fmtInt(static_cast<int>(p.speed() + 0.5f)), numW),
+              cBright, uNum0, uNum1);
+
+        const bool climbing = p.climbFraction() > 0.05f;
+        v = cabinRowV(1, n);
+        lamps(f, g, uLab0, v, -1, fit(climbing ? "GRIP" : "JUMP", labW), cLabel,
+              uLab0, uLab1);
+        lamps(f, g, uNum1, v, 1,
+              fit(fmtInt(static_cast<int>((climbing ? p.climbFraction()
+                                                    : p.jumpCharge()) * 100.0f)),
+                  numW),
+              climbing ? cBright : (p.jumpCharge() > 0.99f ? cGood : cWarn),
+              uNum0, uNum1);
+
+        // One line per mount, against its own lamp: which trigger it is on,
+        // what is bolted there, and what it has left.
+        for (int i = 0; i < guns && 2 + i < n; ++i) {
+            v = cabinRowV(2 + i, n);
+            const int mount = fitted[static_cast<size_t>(i)];
+            const MountedWeapon& w = ws[static_cast<size_t>(mount)];
+            const WeaponDef& def = w.part->weapon;
+            std::string ammo;
+            switch (def.ammo) {
+                case AmmoKind::Unlimited: ammo = "INF"; break;
+                case AmmoKind::Cooldown:
+                    ammo = w.cooldown > 0.01f ? fmt(w.cooldown, 1) : std::string("RDY");
+                    break;
+                case AmmoKind::Limited: ammo = fmtInt(w.rounds); break;
+            }
+            if (def.spinUp > 0.0f && w.spool > 0.02f)
+                ammo = fmtInt(static_cast<int>(w.spool * 100.0f));
+            const bool dry = def.ammo == AmmoKind::Limited && w.rounds == 0 && w.reserve == 0;
+            const Vec3 c = !w.enabled ? cLabel : (dry ? cBad : cNorm);
+            const std::string tag = fmtInt(mount + 1) + (w.group == 0 ? "L" : "R");
+            // A gun row has no gauge across the middle of it, so its name
+            // gets the whole panel between the lamp and the ammo window -
+            // which is the difference between a name and an abbreviation.
+            lamps(f, g, uNum1, v, 1, fit(ammo, 4), c, 0.60f, uNum1);
+            lamps(f, g, -0.86f, v, -1,
+                  fit(tag + " " + w.part->name, room(f, g, -0.86f, 0.56f)),
+                  c, -0.86f, 0.56f);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- briefing
@@ -1909,11 +2695,13 @@ void Game::drawBriefing(AsciiFrame& frame) {
 
     const bool blink = std::fmod(elapsed_, 1.2f) < 0.7f;
     drawText(frame, x + 3, y + boxH - 2,
-             blink ? "[ENTER] DEPLOY   [BKSP] WORKSHOP" : "", kBright);
+             blink ? hk("ENTER", 0) + " DEPLOY   " + hk("BKSP", 1) + " WORKSHOP" : std::string(), kBright);
     if (profile_.maxCleared >= 0)
         drawTextRight(frame, x + boxW - 3, y + boxH - 2, "< > REPLAY CONTRACTS", kDim);
     // The views nobody finds by accident, and the fresh start.
-    drawText(frame, x + 3, y + boxH - 1, "[Z] GUNSIGHT  [X] STEP OUTSIDE THE CABIN  [ESC] PAUSE",
+    drawText(frame, x + 3, y + boxH - 1,
+             "[" + actionLabel(Action::Scope) + "] GUNSIGHT  [" + actionLabel(Action::ToggleView) +
+                 "] EXTERNAL VIEW  " + hk("O", 4) + " CONTROLS",
              kDim);
     drawTextRight(frame, x + boxW - 3, y + boxH - 1,
                   wipeArmed_ > 0.0f ? "[N] AGAIN TO WIPE SAVE!" : "[N] NEW PROFILE",
@@ -1950,14 +2738,15 @@ void Game::drawResult(AsciiFrame& frame) {
 
     // The destruction ledger. Cold numbers; the numbers do the celebrating.
     int unitTotal = 0;
-    for (int i = 0; i < 6; ++i) unitTotal += led.unitKills[i];
+    const int nKinds = std::min(kUnitKindCount, 16);
+    for (int i = 0; i < nKinds; ++i) unitTotal += led.unitKills[i];
     row("HOSTILE MACHINES DESTROYED", fmtInt(led.mechKills), kNorm);
     if (unitTotal > 0) {
-        static const char* names[6] = {"  TROOPERS", "  AT TEAMS", "  APCS",
-                                       "  GUN TANKS", "  TURRETS", "  DRONES"};
         row("UNITS DESTROYED", fmtInt(unitTotal), kNorm);
-        for (int i = 0; i < 6; ++i)
-            if (led.unitKills[i] > 0) row(names[i], fmtInt(led.unitKills[i]), kDim);
+        for (int i = 0; i < nKinds; ++i)
+            if (led.unitKills[i] > 0)
+                row(("  " + std::string(unitKindName(static_cast<UnitKind>(i))) + "S").c_str(),
+                    fmtInt(led.unitKills[i]), kDim);
     }
     if (led.propsDestroyed > 0)
         row("STRUCTURES / MATERIEL", fmtInt(led.propsDestroyed), kNorm);
@@ -1995,7 +2784,7 @@ void Game::drawResult(AsciiFrame& frame) {
         row("THE CONTRACT IS LOST - RUN IT AGAIN", "", kBad);
     }
     drawText(frame, x + 3, y + boxH - 2,
-             won ? "[ENTER] PROCEED TO WORKSHOP" : "[ENTER] REFIT AND RETRY",
+             hk("ENTER", 0) + (won ? " PROCEED TO WORKSHOP" : " REFIT AND RETRY"),
              kBright);
 }
 
@@ -2052,107 +2841,167 @@ void Game::drawStore(AsciiFrame& frame) {
             if (blocked) {
                 drawText(frame, 33, y++, "LOCKED", kDim);
             } else {
-                drawText(frame, 33, y++, p->price > 0 ? money(p->price) : std::string("--"),
-                         cur ? kBright : kDim);
+                drawText(frame, 33, y++,
+                         profile_.hasUnlocked(p->id) ? std::string("SALVAGE")
+                         : p->price > 0 ? money(p->price) : std::string("--"),
+                         profile_.hasUnlocked(p->id) ? kGood : (cur ? kBright : kDim));
             }
         }
     } else {
-        drawText(frame, 2, y++, "[ENTER] BROWSE", kDim);
-        drawText(frame, 2, y++, "[LEFT/RIGHT] MOUNT", kDim);
+        drawText(frame, 2, y++, hk("ENTER", 0) + " BROWSE", kDim);
+        drawText(frame, 2, y++, (padActive_ ? "[D-PAD L/R]" : "[LEFT/RIGHT]") + std::string(" MOUNT"), kDim);
         if (store_.slot() == Slot::Weapon)
-            drawText(frame, 2, y++, "[TAB] TRIGGER GROUP L/R", kDim);
+            drawText(frame, 2, y++, hk("TAB", 3) + " TRIGGER GROUP L/R", kDim);
+        drawText(frame, 2, y++, hk("O", 4) + " CONTROLS", kDim);
     }
 
     // ---- right: the comparison table -------------------------------------
-    const int rx = W - 40;
-    if (rx > 40 && store_.pane() != StorePane::Slots) {
+    // The stat table starts on row 15 and stops five rows short of the
+    // bottom. On a thirty-row grid (a 1440p window at the magnification the
+    // HUD picks there) that is ten rows for up to sixteen lines, and the
+    // rest ran off the bottom of the screen. When they will not fit and
+    // the grid is wide enough, the table goes two columns; when it is not,
+    // the lines that show no change are the ones dropped.
+    const int statCount = static_cast<int>(store_.statLines().size());
+    const int statBottom = H - 5;
+    const bool twoCol = statCount > (statBottom - 15) && W >= 110;
+    const int rx = W - (twoCol ? 66 : 40);
+    if (rx >= 40 && store_.pane() != StorePane::Slots) {
         int ry = 4;
         if (const PartDef* sel = store_.selected()) {
-            drawText(frame, rx, ry++, sel->name, kBright);
-            drawText(frame, rx, ry++, sel->maker, kDim);
-            ry++;
-            // Blurb, wrapped.
-            std::string rest = sel->blurb;
-            const int wrap = 36;
-            while (!rest.empty() && ry < 12) {
-                size_t cut = rest.size();
-                if (static_cast<int>(cut) > wrap) {
-                    cut = static_cast<size_t>(wrap);
-                    while (cut > 0 && rest[cut] != ' ') --cut;
-                    if (cut == 0) cut = static_cast<size_t>(wrap);
+            // The description wraps to the width the panel ACTUALLY has, and
+            // the stat table starts wherever the description ends. Both used
+            // to be pinned to numbers typed in when this panel was a fixed
+            // forty columns and the grid a fixed thirty rows, which is how a
+            // blurb ended up cut off mid-sentence with the table drawn over
+            // the rest of it.
+            const int descW = std::max(16, W - 2 - rx);
+            std::vector<std::pair<std::string, const TextStyle*>> desc;
+            auto wrapInto = [&](const std::string& text, const TextStyle* st) {
+                std::string rest = text;
+                while (!rest.empty()) {
+                    size_t cut = rest.size();
+                    if (static_cast<int>(cut) > descW) {
+                        cut = static_cast<size_t>(descW);
+                        while (cut > 0 && rest[cut] != ' ') --cut;
+                        if (cut == 0) cut = static_cast<size_t>(descW);
+                    }
+                    desc.push_back({rest.substr(0, cut), st});
+                    rest = (cut < rest.size()) ? rest.substr(cut + 1) : std::string();
                 }
-                drawText(frame, rx, ry++, rest.substr(0, cut), kNorm);
-                rest = (cut < rest.size()) ? rest.substr(cut + 1) : std::string();
-            }
+            };
+            desc.push_back({sel->name, &kBright});
+            desc.push_back({sel->maker, &kDim});
+            desc.push_back({std::string(), &kDim});
+            wrapInto(sel->blurb, &kNorm);
             // A chassis trait is the most decisive thing about a hull and it
             // appears on no stat row, so it goes above the ability block in
             // the same place the eye is already looking.
             if (sel->stats.trait != Trait::None) {
-                drawText(frame, rx, ry++,
-                         std::string("TRAIT  ") + traitName(sel->stats.trait), kGood);
-                std::string tb = traitBlurb(sel->stats.trait);
-                const int wrapT = 36;
-                while (!tb.empty() && ry < 14) {
-                    size_t cut = tb.size();
-                    if (static_cast<int>(cut) > wrapT) {
-                        cut = static_cast<size_t>(wrapT);
-                        while (cut > 0 && tb[cut] != ' ') --cut;
-                        if (cut == 0) cut = static_cast<size_t>(wrapT);
-                    }
-                    drawText(frame, rx, ry++, tb.substr(0, cut), kDim);
-                    tb = (cut < tb.size()) ? tb.substr(cut + 1) : std::string();
-                }
-                ++ry;
+                desc.push_back({std::string(), &kDim});
+                desc.push_back({std::string("TRAIT  ") + traitName(sel->stats.trait), &kGood});
+                wrapInto(traitBlurb(sel->stats.trait), &kDim);
             }
             // What this part lets you *do*. More decisive than any stat row.
             if (sel->stats.ability != Ability::None) {
-                drawText(frame, rx, ry++,
-                         std::string(abilityIsActive(sel->stats.ability) ? "[Q] " : "PASSIVE ") +
-                             abilityName(sel->stats.ability), kWarn);
-                std::string ab = abilityBlurb(sel->stats.ability);
-                const int wrapA = 36;
-                while (!ab.empty() && ry < 14) {
-                    size_t cut = ab.size();
-                    if (static_cast<int>(cut) > wrapA) {
-                        cut = static_cast<size_t>(wrapA);
-                        while (cut > 0 && ab[cut] != ' ') --cut;
-                        if (cut == 0) cut = static_cast<size_t>(wrapA);
+                desc.push_back({std::string(), &kDim});
+                desc.push_back({std::string(abilityIsActive(sel->stats.ability)
+                                    ? "[" + actionLabel(Action::AbilityLegs).substr(0, 3) + "] "
+                                    : "PASSIVE ") + abilityName(sel->stats.ability), &kWarn});
+                wrapInto(abilityBlurb(sel->stats.ability), &kDim);
+            }
+            // Share the column out: the table gets the rows it needs, the
+            // description keeps the rest, and whichever has to give way says
+            // so with an ellipsis instead of stopping in the middle of a word.
+            // The table can always fall back to showing only the lines that
+            // actually CHANGED, so it yields to the description first: what
+            // a part does is more decisive than a column of numbers that
+            // read the same either way.
+            int changed = 0;
+            for (const StatLine& l : store_.statLines())
+                if (std::fabs(l.candidate - l.current) >= 1e-3f) ++changed;
+            int statRows = twoCol ? (statCount + 1) / 2 : statCount;
+            const int room = std::max(4, statBottom - ry);
+            int descRows = static_cast<int>(desc.size());
+            if (descRows + 1 + statRows > room) {
+                statRows = std::max(6, std::min(statRows, changed));
+                descRows = std::max(3, room - statRows - 1);
+            }
+            descRows = std::min(descRows, static_cast<int>(desc.size()));
+            for (int i = 0; i < descRows; ++i) {
+                std::string t = desc[static_cast<size_t>(i)].first;
+                // A block that had to be cut short says so - and the marker
+                // has to fit the column too, or the ellipsis is the thing
+                // that runs off the edge.
+                if (i == descRows - 1 && descRows < static_cast<int>(desc.size())) {
+                    if (static_cast<int>(t.size()) + 3 > descW)
+                        t.resize(static_cast<size_t>(std::max(0, descW - 3)));
+                    t += "...";
+                }
+                drawText(frame, rx, ry++, t, *desc[static_cast<size_t>(i)].second);
+            }
+            if (ry < statBottom) ++ry;
+
+            // Which lines to show: all of them when they fit (in one column
+            // or two); otherwise the changed ones first, unchanged ones only
+            // while there is room.
+            std::vector<const StatLine*> shown;
+            {
+                const int avail = std::max(1, statBottom - ry);
+                const int room = twoCol ? avail * 2 : avail;
+                for (const StatLine& l : store_.statLines()) {
+                    const bool same = std::fabs(l.candidate - l.current) < 1e-3f;
+                    if (!same) shown.push_back(&l);
+                }
+                if (statCount <= room) {
+                    shown.clear();
+                    for (const StatLine& l : store_.statLines()) shown.push_back(&l);
+                } else {
+                    for (const StatLine& l : store_.statLines()) {
+                        if (static_cast<int>(shown.size()) >= room) break;
+                        const bool same = std::fabs(l.candidate - l.current) < 1e-3f;
+                        if (same) shown.push_back(&l);
                     }
-                    drawText(frame, rx, ry++, ab.substr(0, cut), kDim);
-                    ab = (cut < ab.size()) ? ab.substr(cut + 1) : std::string();
+                    // Keep the catalogue order.
+                    std::vector<const StatLine*> ordered;
+                    for (const StatLine& l : store_.statLines())
+                        for (const StatLine* q : shown) if (q == &l) ordered.push_back(q);
+                    shown = ordered;
                 }
             }
-            ry = 15;
-
-            for (const StatLine& l : store_.statLines()) {
-                if (ry >= H - 5) break;
+            const int perCol = twoCol ? (static_cast<int>(shown.size()) + 1) / 2
+                                      : static_cast<int>(shown.size());
+            for (size_t si = 0; si < shown.size(); ++si) {
+                const StatLine& l = *shown[si];
+                const int col = (twoCol && static_cast<int>(si) >= perCol) ? 1 : 0;
+                const int cx0 = rx + col * 33;
+                const int cy = ry + static_cast<int>(si) - col * perCol;
+                if (cy >= statBottom) break;
                 // A yes/no stat reads as "1" in a numeric column, which tells
                 // nobody anything.
                 if (l.label == "WALL CAPABLE") {
                     const bool now = l.current > 0.5f, then = l.candidate > 0.5f;
-                    drawText(frame, rx, ry, l.label, kDim);
-                    drawText(frame, rx + 14, ry, now ? "YES" : "NO", now ? kGood : kDim);
+                    drawText(frame, cx0, cy, l.label, kDim);
+                    drawText(frame, cx0 + 14, cy, now ? "YES" : "NO", now ? kGood : kDim);
                     if (now != then) {
-                        drawText(frame, rx + 22, ry, "->", kDim);
-                        drawText(frame, rx + 25, ry, then ? "YES" : "NO",
+                        drawText(frame, cx0 + 22, cy, "->", kDim);
+                        drawText(frame, cx0 + 25, cy, then ? "YES" : "NO",
                                  then ? kGood : kBad);
                     }
-                    ++ry;
                     continue;
                 }
                 // Only show a delta when the numbers actually differ; a table of
                 // identical values is noise that hides the two lines that matter.
                 const bool same = std::fabs(l.candidate - l.current) < 1e-3f;
-                drawText(frame, rx, ry, l.label, kDim);
-                drawText(frame, rx + 14, ry, fmt(l.current, l.digits), kNorm);
+                drawText(frame, cx0, cy, l.label, kDim);
+                drawText(frame, cx0 + 14, cy, fmt(l.current, l.digits), kNorm);
                 if (!same) {
                     const bool better = l.higherIsBetter ? (l.candidate > l.current)
                                                          : (l.candidate < l.current);
-                    drawText(frame, rx + 22, ry, "->", kDim);
-                    drawText(frame, rx + 25, ry, fmt(l.candidate, l.digits),
+                    drawText(frame, cx0 + 22, cy, "->", kDim);
+                    drawText(frame, cx0 + 25, cy, fmt(l.candidate, l.digits),
                              better ? kGood : kBad);
                 }
-                ++ry;
             }
         }
     }
@@ -2182,9 +3031,9 @@ void Game::drawStore(AsciiFrame& frame) {
         }
     }
     drawText(frame, 2, by + 1,
-             "[ENTER] FIT  [BKSP] BACK  [TAB] " +
+             hk("ENTER", 0) + " FIT  " + hk("BKSP", 1) + " BACK  " + hk("TAB", 3) + " " +
                  std::string(store_.comparing() ? "SHOW CURRENT" : "SHOW FITTED") +
-                 "  [X] SELL  [SPACE] DEPLOY", kDim);
+                 "  " + hk("X", 2) + " SELL  " + hk("SPACE", 6) + " DEPLOY", kDim);
 
     if (store_.messageAge() < 2.5f && !store_.message().empty())
         drawTextRight(frame, W - 2, by, store_.message(), kWarn);

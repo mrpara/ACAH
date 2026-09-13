@@ -128,6 +128,8 @@ int Store::priceOfSelected() const {
     const PartDef* p = selected();
     if (!p) return 0;
     if (alreadyFitted()) return 0;
+    // Salvaged off a bounty elite: it is yours.
+    if (profile_ && profile_->hasUnlocked(p->id)) return 0;
     // Trade-in: the fitted part's resale comes off the sticker price, so
     // upgrading within a slot costs the difference rather than the full amount.
     const PartDef* fit = fitted();
@@ -351,10 +353,13 @@ void Store::sellSelected() {
         if (!f || !fallback) return;
         *f = fallback->id;
     }
-    const int refund = static_cast<int>(fit->price * kSellFraction);
+    // Salvage was never bought, so it is never sold: it goes back on the
+    // shelf for nothing and stays there for free.
+    const int refund = profile_->hasUnlocked(fit->id) ? 0
+                     : static_cast<int>(fit->price * kSellFraction);
     profile_->cash += refund;
     profile_->loadout = current_;
-    say("SOLD FOR " + std::to_string(refund) + "cr");
+    say(refund > 0 ? "SOLD FOR " + std::to_string(refund) + "cr" : "RETURNED TO STORES");
     rebuildPreview();
 }
 

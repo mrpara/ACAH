@@ -26,8 +26,14 @@ constexpr float kStallTimeout = 14.0f;  // quiet seconds before hostiles are tol
 // which, with a retry replaying the identical ground, means a wall is a thing
 // you learn and then buy your way through rather than a dead end.
 constexpr float kFailureSalvage = 0.45f; // share of earnings kept on a failed attempt
-constexpr int kFailureFloor = 160;       // flat recovery payment on a failed attempt
-constexpr int kFailureFloorPerPower = 115;
+constexpr int kFailureFloor = 80;        // flat recovery payment on a failed attempt
+constexpr int kFailureFloorPerPower = 58;
+// Every source of income is halved through this. Wave 15: the user found
+// progression far too quick with missions twice as long - every long march
+// was paying twice as much wrecking and clearance too. Applied at each
+// source (not at the payout) so the debrief ledger still adds up.
+constexpr float kPayScale = 0.5f;
+inline int pay(int amount) { return static_cast<int>(amount * kPayScale + 0.5f); }
 constexpr float kSilenceRelocate = 22.0f; // quiet seconds before hostiles are moved to the player
 
 
@@ -53,12 +59,33 @@ const std::vector<LevelDef>& campaignLevels() {
             d.power = power;
             d.difficulty = diff;
             d.objectives = std::move(objectives);
-            d.completionBonus = bonus;
+            d.completionBonus = pay(bonus);
             d.seed = seed;
             d.musicStyle = music;
             d.bossMission = boss;
             d.propBudget = propBudget;
             v.push_back(d);
+        };
+
+        // A BOUNTY ELITE: one named machine, hand-built, with the weapon it
+        // is known for. Killing it puts that weapon in the workshop for free.
+        auto elite = [](A brain, const char* callsign, const char* chassis, const char* legs,
+                        const char* engine, const char* armor, const char* sensor,
+                        std::vector<std::string> weapons, const char* drop) {
+            WaveSpec w;
+            w.enemies = {brain};
+            w.elite = true;
+            w.callsign = callsign;
+            w.eliteLoadout.chassis = chassis;
+            w.eliteLoadout.legs = legs;
+            w.eliteLoadout.engine = engine;
+            w.eliteLoadout.armor = armor;
+            w.eliteLoadout.sensor = sensor;
+            w.eliteLoadout.ensureWeaponSlots();
+            for (size_t i = 0; i < weapons.size() && i < w.eliteLoadout.weapons.size(); ++i)
+                w.eliteLoadout.weapons[i] = weapons[i];
+            w.dropWeapon = drop;
+            return w;
         };
 
         auto obj = [](O kind, const char* label, int count, float timer,
@@ -118,8 +145,10 @@ const std::vector<LevelDef>& campaignLevels() {
             3, 0.18f,
             {obj(O::ReachZone, "MARCH INTO THE CANYON", 0, 0.0f, {}, 5, 2, 1, 0, 0, 2),
              obj(O::DestroyMarked, "BLIND THE ROAD WATCH", 3, 0.0f, {}, 4, 1, 1, 0, 1, 1),
-             obj(O::ClearHostiles, "BREAK THE CANYON PICKET", 0, 0.0f,
-                 {WaveSpec{{A::Skirmisher}, 0.0f}}, 6, 2, 1, 1, 1, 2),
+             obj(O::KillTarget, "BOUNTY: THE TOLLKEEPER", 0, 0.0f,
+                 {elite(A::Brawler, "TOLLKEEPER", "ch_mule", "lg_anvil", "en_milspec",
+                        "ar_ceramic", "se_basic", {"wp_cinder", "wp_cinder", "wp_thumper"},
+                        "wp_cinder")}, 4, 2, 1, 0, 1, 2),
              obj(O::Convoy, "DESTROY THE COLUMN", 4, 340.0f, {}, 2, 1, 0, 0, 0, 2)},
             1160, 91003u, 1);
 
@@ -127,10 +156,15 @@ const std::vector<LevelDef>& campaignLevels() {
             "Their air cover is guided from four relay masts under the trees. "
             "Drop the masts. Every one still standing keeps the drones coming.",
             4, 0.24f,
-            {obj(O::Blackout, "DROP THE RELAY MASTS", 4, 0.0f, {}, 3, 1, 0, 0, 0, 1),
-             obj(O::DestroyMarked, "BURN THE FOREST FUEL DUMP", 2, 0.0f, {}, 3, 1, 1, 0, 0, 1),
-             obj(O::ReachZone, "EXFILTRATE THROUGH THE TREELINE", 0, 0.0f, {}, 3, 1, 0, 0, 0, 1)},
-            1400, 91004u, 2);
+            {[&] { ObjectiveSpec o = obj(O::Blackout, "DROP THE RELAY MASTS", 4, 0.0f, {}, 3, 1, 0, 0, 0, 1);
+                   o.lightsOut = true;   // the grid goes with the masts
+                   return o; }(),
+             obj(O::DestroyMarked, "BURN THE FOREST FUEL DUMP IN THE DARK", 2, 0.0f, {}, 3, 1, 1, 0, 0, 1),
+             [&] { ObjectiveSpec o = obj(O::ReachZone, "EXFILTRATE THROUGH THE TREELINE", 0, 0.0f, {}, 3, 1, 0, 0, 0, 1);
+                   o.ambush = true;      // the treeline was waiting
+                   return o; }(),
+             obj(O::ClearHostiles, "BREAK THE AMBUSH", 0, 0.0f, {}, 2, 1, 0, 0, 0, 1)},
+            1400, 91004u, 6);
 
         add("industrial", "THE WARDEN",
             "The yard has a keeper: a Combine spidertank, ex-military, "
@@ -152,16 +186,22 @@ const std::vector<LevelDef>& campaignLevels() {
             {obj(O::ReachZone, "CLIMB TO THE TERRACES", 0, 0.0f, {}, 4, 1, 1, 0, 1, 0),
              obj(O::DestroyMarked, "WRECK THE OBSERVATION POST", 3, 0.0f, {}, 5, 2, 0, 1, 2, 0),
              obj(O::HoldZone, "HOLD THE SHELF", 0, 80.0f,
-                 {WaveSpec{{A::Skirmisher}, 0.0f}}, 4, 1, 1, 0, 0, 2)},
-            2160, 91006u, 1);
+                 {WaveSpec{{A::Skirmisher}, 0.0f}}, 4, 1, 1, 0, 0, 2),
+             obj(O::KillTarget, "BOUNTY: THE HIGHWAYMAN", 0, 0.0f,
+                 {elite(A::Lancer, "HIGHWAYMAN", "ch_shrike", "lg_grasshopper", "en_milspec",
+                        "ar_ceramic", "se_track", {"wp_stiletto", "wp_stiletto", "wp_swarm"},
+                        "wp_swarm")}, 2, 1, 0, 0, 0, 2)},
+            2160, 91006u, 5);
 
         add("causeway", "GREY SOUND",
             "A recovery crawler has to cross the sound tonight, and the only "
             "way over is the causeway chain. Machines cannot swim - theirs or "
             "ours. Keep the crawler alive to the far shore.",
             7, 0.44f,
-            {obj(O::Escort, "ESCORT THE CRAWLER ACROSS", 0, 0.0f,
-                 {WaveSpec{{A::Skirmisher}, 0.0f}}, 4, 3, 1, 0, 1, 2)},
+            {[&] { ObjectiveSpec o = obj(O::Escort, "ESCORT THE CRAWLER ACROSS", 0, 0.0f,
+                                         {WaveSpec{{A::Skirmisher}, 0.0f}}, 4, 3, 1, 0, 1, 2);
+                   o.ambush = true;      // they let it get halfway
+                   return o; }()},
             2520, 91007u, 2, false, 36);
 
         add("underworks", "THE UNDERWORKS",
@@ -173,18 +213,23 @@ const std::vector<LevelDef>& campaignLevels() {
                  {WaveSpec{{A::Brawler}, 0.0f}}, 6, 2, 1, 1, 1, 0),
              obj(O::DestroyMarked, "WRECK THE PUMP HALLS", 3, 0.0f, {}, 4, 2, 1, 0, 1, 0),
              obj(O::ReachZone, "REACH THE FAR JUNCTION", 0, 0.0f, {}, 4, 2, 0, 1, 1, 0)},
-            2930, 91008u, 0, false, 52);
+            2930, 91008u, 4, false, 52);
 
-        add("saltflats", "SCORCHED LEDGER",
-            "Open contract: everything Combine-flagged on the pan is billable "
-            "at full rate for the next two minutes of satellite window. Flat "
-            "ground, long sightlines, no cover worth the name. Spend it well.",
+        add("metro", "SCORCHED LEDGER",
+            "Open contract: everything Combine-flagged in the transit district "
+            "is billable at full rate for the next four minutes of satellite "
+            "window. Street grid, a garrison in every block, and their "
+            "accountant is in there somewhere with a long gun. Spend it well.",
             9, 0.55f,
             {obj(O::ReachZone, "MARCH TO THE DEPOT LINE", 0, 0.0f, {}, 3, 2, 1, 0, 1, 1),
              obj(O::Rampage, "DESTRUCTION WINDOW", 1400, 240.0f,
                  {WaveSpec{{A::Lancer, A::Skirmisher}, 0.0f}}, 6, 2, 2, 1, 0, 3),
-             obj(O::ReachZone, "WALK OFF THE PAN", 0, 0.0f, {}, 2, 1, 0, 0, 0, 2)},
-            3360, 91009u, 1, false, 64);
+             obj(O::KillTarget, "BOUNTY: THE AUDITOR", 0, 0.0f,
+                 {elite(A::Sniper, "AUDITOR", "ch_viper", "lg_strider", "en_halcyon",
+                        "ar_weave", "se_lidar", {"wp_lance", "wp_needle"}, "wp_lance")},
+                 3, 2, 0, 0, 0, 2),
+             obj(O::ReachZone, "WALK OUT OF THE GRID", 0, 0.0f, {}, 2, 1, 0, 0, 0, 2)},
+            3360, 91009u, 5, false, 64);
 
         add("outpost", "FORTRESS GATE",
             "The ridge line is fortified end to end and their guns are "
@@ -198,14 +243,22 @@ const std::vector<LevelDef>& campaignLevels() {
             // thing in the act, not a wall you cannot approach: two
             // emplacements and one tank still reads as a fortress, and the
             // rocket teams behind it still punish a straight approach.
+            // The FORTRESS: a strongpoint with weak points, taken in order.
+            // Two shield pylons cover the gate and its towers; nothing under
+            // them can be scratched until the pylons fall. Then the towers.
+            // Then the gate itself - an armoured slab that takes a siege to
+            // open - while the relief sieger walks in behind you.
             {obj(O::Breakthrough, "BREACH THE FORTIFIED LINE", 0, 0.0f,
-                 // The siege machine is the RELIEF force, not part of the line.
-                 // Break the emplacements first; it turns up while you are
-                 // still doing it.
                  {WaveSpec{{A::Sieger}, 55.0f}}, 4, 3, 1, 1, 2, 0),
+             [&] { ObjectiveSpec o = obj(O::KillUnits, "DROP THE SHIELD GENERATORS", 2, 0.0f, {}, 3, 2, 0, 0, 1, 0);
+                   o.killKind = UnitKind::ShieldPylon; o.pylons = 2; return o; }(),
+             [&] { ObjectiveSpec o = obj(O::KillUnits, "SILENCE THE TOWERS", 3, 0.0f, {}, 2, 2, 0, 1, 3, 0);
+                   o.killKind = UnitKind::Turret; return o; }(),
+             [&] { ObjectiveSpec o = obj(O::DestroyMarked, "BREACH THE GATE", 1, 0.0f,
+                                         {WaveSpec{{A::Brawler, A::Brawler}, 40.0f}}, 3, 2, 0, 1, 0, 0);
+                   o.gateHealth = 520.0f; o.pylons = 1; return o; }(),
              obj(O::ReachZone, "CROSS THE KILLING GROUND", 0, 0.0f, {}, 3, 2, 0, 1, 1, 0),
-             obj(O::DestroyMarked, "SILENCE THE BATTERY", 2, 0.0f,
-                 {WaveSpec{{A::Brawler, A::Brawler}, 40.0f}}, 3, 2, 0, 1, 2, 0)},
+             obj(O::DestroyMarked, "SILENCE THE BATTERY", 2, 0.0f, {}, 3, 2, 0, 1, 2, 0)},
             3960, 91010u, 3, true);
 
         // ================= ACT III : THE HEARTLAND ========================
@@ -214,12 +267,13 @@ const std::vector<LevelDef>& campaignLevels() {
             "Their counter-attack forms up in the high valleys. Meet it on "
             "the ridge, break it, and hold the pass until it stops coming.",
             11, 0.70f,
-            {obj(O::ReachZone, "CLIMB TO THE RIDGE", 0, 0.0f, {}, 3, 2, 1, 0, 0, 1),
+            {[&] { ObjectiveSpec o = obj(O::Outrun, "OUTRUN THE BARRAGE TO THE RIDGE", 0, 0.0f, {}, 3, 2, 1, 0, 0, 1);
+                   o.barrageSpeed = 7.5f; return o; }(),
              obj(O::ClearHostiles, "BREAK THE FIRST ECHELON", 0, 0.0f,
                  {WaveSpec{{A::WallRunner, A::Skirmisher}, 0.0f}}, 5, 3, 2, 2, 0, 2),
              obj(O::HoldZone, "HOLD THE PASS", 0, 100.0f,
                  {WaveSpec{{A::Brawler, A::Sniper}, 0.0f}}, 5, 2, 1, 1, 0, 3)},
-            4560, 91011u, 3);
+            4560, 91011u, 0);
 
         add("refinery", "COLUMN ZERO",
             "Their armoured reserve is refuelling its way down Ironworks Row "
@@ -230,19 +284,27 @@ const std::vector<LevelDef>& campaignLevels() {
                  {WaveSpec{{A::Brawler}, 0.0f}}, 4, 2, 1, 1, 2, 0),
              obj(O::Convoy, "ANNIHILATE THE RESERVE COLUMN", 6, 560.0f,
                  {WaveSpec{{A::Lancer, A::Lancer}, 0.0f}}, 2, 2, 0, 0, 2, 2),
-             obj(O::DestroyMarked, "BURN THE FUEL FARMS", 2, 0.0f, {}, 2, 1, 0, 0, 1, 0)},
-            5160, 91012u, 1);
+             obj(O::DestroyMarked, "BURN THE FUEL FARMS", 2, 0.0f, {}, 2, 1, 0, 0, 1, 0),
+             obj(O::KillTarget, "BOUNTY: THE ANVIL", 0, 0.0f,
+                 {elite(A::Sieger, "ANVIL", "ch_ferrum", "lg_titan", "en_pyre",
+                        "ar_reactive", "se_wide", {"wp_hammerfall", "wp_vulcan", "wp_javelin"},
+                        "wp_hammerfall")}, 2, 2, 0, 0, 0, 0)},
+            5160, 91012u, 4);
 
-        add("craters", "DEEP RELAY",
-            "The impact field hides the uplink chain for their whole southern "
-            "grid, and a pair of climbing frames patrol it. Kill the chain, "
+        add("oldtown", "DEEP RELAY",
+            "The old quarter hides the uplink chain for their whole southern "
+            "grid: masts on the tenement roofs, sappers in the alleys, and a "
+            "pair of climbing frames patrolling the rooftops. Kill the chain, "
             "kill the climbers, leave.",
             13, 0.82f,
-            {obj(O::Blackout, "KILL THE UPLINK CHAIN", 5, 0.0f, {}, 4, 3, 1, 1, 1, 3),
+            {[&] { ObjectiveSpec o = obj(O::Blackout, "KILL THE UPLINK CHAIN", 5, 0.0f, {}, 4, 3, 1, 1, 1, 3);
+                   o.sappers = 3; o.lightsOut = true; return o; }(),
              obj(O::KillTarget, "DESTROY THE PATROL FRAMES", 0, 0.0f,
                  {WaveSpec{{A::WallRunner, A::WallRunner}, 0.0f}}, 2, 1, 0, 0, 0, 2),
-             obj(O::ReachZone, "LEAVE THE IMPACT FIELD", 0, 0.0f, {}, 3, 1, 0, 0, 0, 2)},
-            5760, 91013u, 2);
+             [&] { ObjectiveSpec o = obj(O::ReachZone, "LEAVE THE QUARTER", 0, 0.0f, {}, 3, 1, 0, 0, 0, 2);
+                   o.ambush = true; return o; }(),
+             obj(O::ClearHostiles, "FIGHT OUT OF THE AMBUSH", 0, 0.0f, {}, 2, 1, 0, 0, 0, 0)},
+            5760, 91013u, 6);
 
         add("causeway", "LAST CROSSING",
             "One bridge chain left between us and the arcology. They know it "
@@ -251,6 +313,12 @@ const std::vector<LevelDef>& campaignLevels() {
             14, 0.88f,
             {obj(O::Escort, "ESCORT THE DEMOLITION CRAWLER", 0, 0.0f,
                  {WaveSpec{{A::Skirmisher, A::Sniper}, 0.0f}}, 4, 4, 1, 1, 2, 3),
+             obj(O::KillTarget, "BOUNTY: THE HERON", 0, 0.0f,
+                 {elite(A::WallRunner, "HERON", "ch_shrike", "lg_gecko", "en_milspec",
+                        "ar_weave", "se_seeker", {"wp_arclight", "wp_arclight"}, "wp_arclight")},
+                 2, 2, 0, 0, 1, 2),
+             [&] { ObjectiveSpec o = obj(O::ReachZone, "THE CHAIN IS WIRED - GET ACROSS", 0, 0.0f, {}, 2, 2, 0, 0, 1, 2);
+                   o.collapse = true; return o; }(),
              obj(O::Breakthrough, "FORCE THE ANCHORAGE", 0, 0.0f,
                  {WaveSpec{{A::Brawler, A::Brawler}, 40.0f}}, 3, 2, 1, 1, 2, 0)},
             6480, 91014u, 3, false, 40);
@@ -322,11 +390,11 @@ const std::vector<LevelDef>& campaignLevels() {
                     // spawn. A route at power ten is a marksman, a mortar
                     // section, an armoured pocket and a handful of infantry -
                     // not fifteen riflemen.
-                    m2.troopers = std::max(1, 3 + power / 2 - power / 4);
-                    m2.atTeams = power / 3;
-                    m2.tanks = (power >= 5) ? power / 5 : 0;
-                    m2.apcs = (power >= 2) ? 1 + power / 7 : 1;
-                    m2.drones = (power >= 4) ? 1 : 1;
+                    m2.troopers = std::max(2, 4 + power / 2 - power / 4);
+                    m2.atTeams = 1 + power / 3;
+                    m2.tanks = (power >= 3) ? 1 + power / 6 : 0;
+                    m2.apcs = (power >= 2) ? 1 + power / 6 : 1;
+                    m2.drones = (power >= 3) ? 2 : 1;
                     m2.overwatch = power / 4;
                     // The second tier arrives on the march segments, which is
                     // where the player has room to react to it.
@@ -335,6 +403,8 @@ const std::vector<LevelDef>& campaignLevels() {
                     m2.jammers  = (power >= 8 && (k % 3u) == 1u) ? 1 : 0;
                     if (power >= 6 && (k % 2u) == 0u)
                         m2.waves.push_back(WaveSpec{{Archetype::Skirmisher}, 0.0f});
+                    if (power >= 11 && (k % 3u) == 2u) m2.launchers = 1;
+                    if (power >= 10 && (k % 3u) == 0u) m2.gunships = 1;
                     chain.push_back(m2);
                     ++inserted;
                 }
@@ -343,14 +413,15 @@ const std::vector<LevelDef>& campaignLevels() {
                 // overwatch tanks on top made the column untouchable inside
                 // its timer.
                 if (o.kind != ObjectiveKind::Convoy &&
-                    o.kind != ObjectiveKind::KillTarget) {
+                    o.kind != ObjectiveKind::KillTarget &&
+                    o.kind != ObjectiveKind::KillUnits) {
                     o.overwatch = std::max(o.overwatch, power / 5);
                     // Half what it was. A real objective used to gain a
                     // squad's worth of extra infantry on top of whatever it
                     // was written with, which is how "fewer but more
                     // dangerous" kept turning back into a crowd.
-                    o.troopers += 1 + power / 4;
-                    o.atTeams += power / 5;
+                    o.troopers += 2 + power / 4;
+                    o.atTeams += 1 + power / 4;
                     // A defended objective is where a WARDEN belongs: it is
                     // the thing that makes a strongpoint a strongpoint, and
                     // it turns "shoot everything" into "shoot the right thing
@@ -358,6 +429,16 @@ const std::vector<LevelDef>& campaignLevels() {
                     if (power >= 6) o.wardens = std::max(o.wardens, 1);
                     if (power >= 8) o.marksmen += 1;
                     if (power >= 10) o.jammers = std::max(o.jammers, 1);
+                    // The third tier on the real objectives: a gunship over
+                    // every defended position from the second act on, rocket
+                    // trucks behind the late ones, a shield pylon on the
+                    // hardest, sappers in the alleys of every city.
+                    if (power >= 7) o.gunships = std::max(o.gunships, 1);
+                    if (power >= 9 && (i % 2u) == 1u) o.launchers = std::max(o.launchers, 1);
+                    if (power >= 12 && o.kind == ObjectiveKind::DestroyMarked)
+                        o.pylons = std::max(o.pylons, 1);
+                    if (power >= 8 && arenaById(d.arenaId) && arenaById(d.arenaId)->urban)
+                        o.sappers = std::max(o.sappers, 3);
                 }
                 chain.push_back(o);
             }
@@ -377,11 +458,11 @@ const std::vector<LevelDef>& campaignLevels() {
                 m2.label = (m2.kind == ObjectiveKind::ReachZone)
                                ? exitNames[mi % 4]
                                : marchNames[(nameBase + k++) % nMarch];
-                m2.troopers = std::max(1, 3 + power / 2 - power / 4);
-                m2.atTeams = power / 3;
-                m2.tanks = (power >= 5) ? power / 5 : 0;
-                m2.apcs = (power >= 2) ? 1 + power / 7 : 1;
-                m2.drones = 1;
+                m2.troopers = std::max(2, 4 + power / 2 - power / 4);
+                m2.atTeams = 1 + power / 3;
+                m2.tanks = (power >= 3) ? 1 + power / 6 : 0;
+                m2.apcs = (power >= 2) ? 1 + power / 6 : 1;
+                m2.drones = 2;
                 m2.overwatch = power / 4;
                 m2.marksmen = (power >= 5) ? 1 : 0;
                 m2.mortars  = (power >= 7) ? 1 : 0;
@@ -410,7 +491,7 @@ LevelDef endlessLevel(int index) {
                  "record. Kill what you can and hold the sector.";
     d.power = 12 + beyond;
     d.difficulty = clampf(0.92f + beyond * 0.01f, 0.0f, 1.0f);
-    d.completionBonus = 7200 + beyond * 1700;
+    d.completionBonus = pay(7200 + beyond * 1700);
     d.seed = 0x5EED0000u + static_cast<uint32_t>(n) * 7919u;
 
     const int waves = 3 + std::min(3, beyond / 3);
@@ -495,6 +576,7 @@ bool saveProfile(const PlayerProfile& p, const char* path) {
     }
     for (const auto& a : p.ammoStock)
         if (a.second > 0) std::fprintf(f, "ammo %s %d\n", a.first.c_str(), a.second);
+    for (const std::string& u : p.unlocked) std::fprintf(f, "unlocked %s\n", u.c_str());
     std::fclose(f);
     return true;
 }
@@ -536,6 +618,8 @@ bool loadProfile(PlayerProfile& p, const char* path) {
         } else if (!std::strcmp(key, "ammo") &&
                    std::sscanf(line, "%*s %127s %d", sval, &ival) == 2) {
             p.addAmmo(sval, ival);
+        } else if (!std::strcmp(key, "unlocked") && std::sscanf(line, "%*s %127s", sval) == 1) {
+            if (!p.hasUnlocked(sval)) p.unlocked.push_back(sval);
         }
     }
     std::fclose(f);
@@ -568,7 +652,16 @@ float enemyHealthScale(int power) {
     // Eased down after playtesting said the middle of the campaign was a wall.
     // Enemies are still tougher every mission, just on a gentler slope, and
     // the ceiling is lower so the endless ladder does not become a sponge.
-    return clampf(0.26f + static_cast<float>(power) * 0.040f, 0.26f, 1.05f);
+    // Wave 15: the first act's spidertanks were "WAY too tough" in hull and
+    // plate. Lower floor and a gentler start; the late curve is unchanged.
+    return clampf(0.19f + static_cast<float>(power) * 0.036f, 0.19f, 1.05f);
+}
+
+float enemyArmorScale(int power) {
+    // Hostile plate is thinned in the first act (half at power 1, full by
+    // power 8) so an early enemy machine dies to the guns the player can
+    // afford, and the armour meta arrives with the tiers that answer it.
+    return clampf(0.45f + static_cast<float>(power) * 0.07f, 0.45f, 1.0f);
 }
 
 float enemyDamageScale(int power) {
@@ -577,7 +670,9 @@ float enemyDamageScale(int power) {
     // scaled - what they buy is what it does - so the curve reads as the
     // opposition getting more dangerous rather than the player's kit getting
     // quietly better, which is the honest version of the same difficulty ramp.
-    return clampf(0.34f + static_cast<float>(power) * 0.042f, 0.34f, 1.0f);
+    // Wave 15: raised - "little reason to take cover or dodge". Half rating
+    // on the first contract, full by the tenth, a touch over after.
+    return clampf(0.42f + static_cast<float>(power) * 0.052f, 0.42f, 1.15f);
 }
 
 int bountyFor(const Loadout& l, const MechStats& s, int power) {
@@ -594,8 +689,8 @@ int bountyFor(const Loadout& l, const MechStats& s, int power) {
     // together - which meant the carefully drawn completion curve decided
     // nothing at all and one lucky boss kill bought two tiers of upgrade.
     // Killing an enemy machine should be a good day's work, not a jackpot.
-    const float pay = threat * 2.6f * (0.85f + power * 0.045f);
-    return std::max(30, static_cast<int>(pay));
+    const float payout = threat * 2.6f * (0.85f + power * 0.045f) * kPayScale;
+    return std::max(15, static_cast<int>(payout));
 }
 
 // ----------------------------------------------------------------- mission
@@ -660,6 +755,12 @@ void Mission::begin(const LevelDef& level, PlayerProfile& profile) {
     objectiveIndex_ = -1;
     objectiveProgress_ = objectiveTarget_ = 0;
     objectiveTimer_ = 0.0f;
+    blackout_ = blackoutTarget_ = 0.0f;
+    barrageAlong_ = -1e9f;
+    barrageTimer_ = 0.0f;
+    collapseTimer_ = -1.0f;
+    collapsed_ = false;
+    ambushSprung_ = escortAmbushSprung_ = false;
 
     // A mission without an explicit objective chain is the old shape: one
     // segment, clear everything. Endless patrols still use it.
@@ -725,7 +826,8 @@ void Mission::spawnMechWave(const WaveSpec& w, const Vec3& around) {
     for (Archetype a : w.enemies) {
         if (static_cast<int>(mechs_.size()) >= 1 + kMaxEnemiesAlive * 3) break;
 
-        Loadout l = enemyLoadout(a, level_.power, rng_);
+        Loadout l = w.elite ? w.eliteLoadout : enemyLoadout(a, level_.power, rng_);
+        if (w.elite) l.ensureWeaponSlots();
         const MechStats st = deriveStats(l);
 
         // Snipers and wall-runners want distance; brawlers start closer so the
@@ -807,14 +909,23 @@ void Mission::spawnMechWave(const WaveSpec& w, const Vec3& around) {
                                   ? std::max(enemyHealthScale(level_.power), 1.15f)
                                   : enemyHealthScale(level_.power);
         e.scaleHealth(hpScale * (level_.bossMission ? 1.8f : 1.0f));
+        if (!(a == Archetype::Stalker && level_.power <= 3))
+            e.scaleArmor(enemyArmorScale(level_.power));
         // A stalker is a named set-piece, not a line unit: it is the hardest
         // single machine in the early game to actually corner, and cornering
         // it should be worth the twenty minutes it takes. Its own frame is
         // feather-light, so the threat formula - which prices armour and guns
         // - badly under-rates what it costs the player to kill.
         const float bountyMul = (level_.bossMission ? 2.0f : 1.0f) *
-                                ((a == Archetype::Stalker) ? 2.6f : 1.0f);
+                                ((a == Archetype::Stalker) ? 2.6f : 1.0f) *
+                                (w.elite ? 2.2f : 1.0f);
         e.setBounty(static_cast<int>(bountyFor(l, st, level_.power) * bountyMul));
+        // A bounty elite is a named machine with a real crew: it keeps more
+        // of its structure than the line does, and it says who it is.
+        if (w.elite) {
+            e.setCallsign(w.callsign);
+            e.scaleHealth(1.35f);
+        }
         e.refillAmmo();
         mechs_.push_back(std::move(e));
 
@@ -867,7 +978,9 @@ void Mission::rescueStuckEnemies(float dt) {
         // moving, or the whole fight has been silent long enough that nobody
         // is finding anybody. The second catches the cases the first cannot -
         // a machine happily circling a spot the player will never walk to.
-        const bool longSilence = quietFor_ > kSilenceRelocate;
+        // A stalker being out of contact is the stalker working; it gets
+        // a long rope before the relocation rule fires.
+        const bool longSilence = quietFor_ > (brains_[i].isStalker() ? 80.0f : kSilenceRelocate);
         if (stuckFor_[i] > 6.0f || longSilence) {
             // Re-initialising is the only way to reset the gait cleanly, but it
             // also restores full health - so carry the damage across, otherwise
@@ -894,6 +1007,7 @@ void Mission::rescueStuckEnemies(float dt) {
                    rng_.next() | 1u);
             m.setIndex(static_cast<int>(i));
             m.scaleHealth(enemyHealthScale(level_.power));
+            m.scaleArmor(enemyArmorScale(level_.power));
             m.applyDamage(m.health() * (1.0f - hurt), Vec3(0.0f, 1.0f, 0.0f));
             m.setBounty(bounty);
             m.refillAmmo();
@@ -916,7 +1030,137 @@ void Mission::handleDestroyed(const CombatEvents& ev) {
         // Wreck: a big bloom plus whatever heavy ammunition it was carrying.
         combat_.explosion(m.hitCentre(), 3.4f, Vec3(1.0f, 0.72f, 0.34f), rng_);
         combat_.dropSalvage(m, rng_);
+        // A bounty elite's signature weapon comes off the wreck.
+        if (!m.callsign().empty()) {
+            ledger_.eliteKilled = m.callsign();
+            const ObjectiveSpec* spec = currentObjective();
+            if (spec)
+                for (const WaveSpec& w : spec->waves)
+                    if (w.elite && w.callsign == m.callsign() && !w.dropWeapon.empty())
+                        ledger_.salvagedPart = w.dropWeapon;
+            combat_.explosion(m.hitCentre(), 5.5f, Vec3(1.0f, 0.85f, 0.45f), rng_);
+        }
     }
+}
+
+std::string Mission::eliteCallsign() const {
+    for (int i : markedMechs_)
+        if (i > 0 && i < static_cast<int>(mechs_.size()) && mechs_[static_cast<size_t>(i)].alive() &&
+            !mechs_[static_cast<size_t>(i)].callsign().empty())
+            return mechs_[static_cast<size_t>(i)].callsign();
+    return std::string();
+}
+
+Vec3 Mission::hiddenSpot(const Vec3& near, const Vec3& from) {
+    // Sample around `near`; keep the candidate that is closest to a wall and
+    // out of sight of `from`. Alleys and building corners win; open ground
+    // only if there is nothing else.
+    Vec3 best = near;
+    float bestScore = -1e9f;
+    for (int i = 0; i < 18; ++i) {
+        const float ang = rng_.range(0.0f, TAU);
+        const float rad = rng_.range(6.0f, 34.0f);
+        Vec3 c = near + Vec3(std::sin(ang) * rad, 0.0f, std::cos(ang) * rad);
+        if (world_.insideStructure(c, 1.2f)) continue;
+        if (world_.hasWater() && world_.terrain().height(c.x, c.z) < world_.waterLevel() + 0.3f) continue;
+        c.y = world_.terrain().height(c.x, c.z);
+        float wall = 1e9f;
+        for (const Obstacle& o : world_.obstacles()) {
+            if (!o.active || o.kind != ObstacleKind::Building || o.half.y < 2.5f) continue;
+            const float d = lengthXZ(o.center - c) - std::max(o.half.x, o.half.z);
+            if (d < wall) wall = d;
+        }
+        const bool seen = world_.lineOfSight(c + Vec3(0.0f, 1.4f, 0.0f), from + Vec3(0.0f, 2.5f, 0.0f));
+        const float score = (seen ? 0.0f : 40.0f) - std::min(wall, 40.0f);
+        if (score > bestScore) { bestScore = score; best = c; }
+    }
+    return best;
+}
+
+void Mission::spawnAmbush(const Vec3& at) {
+    // Out of the alleys: rocket teams first, riflemen behind, one vehicle
+    // pulling round the corner, and at the higher powers a pack of sappers.
+    const int p = level_.power;
+    const int atTeams = 2 + p / 5;
+    const int troopers = 3 + p / 4;
+    for (int i = 0; i < atTeams; ++i)
+        spawnUnitAlerted(UnitKind::ATTrooper, hiddenSpot(at, at), 0, Vec3(0.0f));
+    for (int i = 0; i < troopers; ++i)
+        spawnUnitAlerted(UnitKind::Trooper, hiddenSpot(at, at), 0, Vec3(0.0f));
+    spawnUnitAlerted(p >= 7 ? UnitKind::Tank : UnitKind::APC,
+                     at + missionAxis_ * 38.0f + Vec3(rng_.range(-15.0f, 15.0f), 0.0f, 0.0f), 0, Vec3(0.0f));
+    if (p >= 8)
+        for (int i = 0; i < 3; ++i)
+            spawnUnitAlerted(UnitKind::Sapper, hiddenSpot(at, at), 0, Vec3(0.0f));
+    if (p >= 11) spawnUnitAlerted(UnitKind::Gunship, at - missionAxis_ * 60.0f, 0, Vec3(0.0f));
+    alarm_ = 1.0f;
+}
+
+void Mission::collapseDecksBehind(float along) {
+    // Every causeway deck (and the pillars under it) behind the line goes,
+    // with a chain of blasts down the road so the pilot sees it happen.
+    const float startAlong = dot(checkpointPos_, missionAxis_);
+    int blown = 0;
+    for (const Obstacle& o : world_.obstacles()) {
+        if (!o.active || o.kind != ObstacleKind::Building) continue;
+        if (o.half.y > 0.5f || std::max(o.half.x, o.half.z) < 10.0f) continue;   // decks only
+        const float a = dot(o.center, missionAxis_);
+        if (a > along || a < startAlong - 12.0f) continue;
+        if (world_.demolishNear(o.center, 4.0f) > 0) {
+            combat_.explosion(o.center + Vec3(0.0f, 1.0f, 0.0f), 6.0f, Vec3(1.0f, 0.6f, 0.3f), rng_);
+            ++blown;
+        }
+    }
+    (void)blown;
+    collapsed_ = true;
+}
+
+void Mission::fireShell(const Vec3& at, float scatter) {
+    static WeaponDef shell = [] {
+        WeaponDef w;
+        w.damage = 8.0f;
+        w.projectileSpeed = 70.0f;
+        w.blastRadius = 6.0f;
+        w.blastDamage = 34.0f;
+        w.gravity = -22.0f;
+        w.range = 700.0f;
+        w.tracerLength = 2.2f;
+        w.tracerRadius = 0.2f;
+        w.tracerColor = Vec3(1.0f, 0.5f, 0.2f);
+        return w;
+    }();
+    const Vec3 fall = at + Vec3(rng_.range(-scatter, scatter), 0.0f, rng_.range(-scatter, scatter));
+    ShotRequest sr;
+    sr.origin = fall + Vec3(rng_.range(-20.0f, 20.0f), 85.0f, rng_.range(-20.0f, 20.0f));
+    sr.direction = normalize(fall - sr.origin);
+    sr.weapon = &shell;
+    sr.team = Team::Hostile;
+    sr.shooter = -1;
+    shots_.push_back(sr);
+}
+
+void Mission::updateShields() {
+    // Everything hostile under a live pylon is immune this frame - the
+    // pylon itself excepted, so the answer is always the same: kill the
+    // pylon first. The player is never shielded by an enemy pylon.
+    std::vector<std::pair<Vec3, float>> domes;
+    for (const Unit& u : units_)
+        if (u.alive() && u.kind() == UnitKind::ShieldPylon && u.team() == Team::Hostile)
+            domes.push_back({u.position(), u.stats().supportRadius});
+    auto covered = [&](const Vec3& p) {
+        for (const auto& d : domes)
+            if (lengthSq(flattenY(p - d.first)) < d.second * d.second) return true;
+        return false;
+    };
+    for (Unit& u : units_) {
+        if (!u.alive()) continue;
+        u.setShielded(u.team() == Team::Hostile && u.kind() != UnitKind::ShieldPylon &&
+                      !domes.empty() && covered(u.position()));
+    }
+    for (Destructible& d : props_) d.shielded = !domes.empty() && covered(d.pos);
+    for (size_t i = 1; i < mechs_.size(); ++i)
+        if (mechs_[i].alive())
+            mechs_[i].setShielded(!domes.empty() && covered(mechs_[i].position()));
 }
 
 void Mission::update(float dt, const MechInput& playerInput) {
@@ -987,6 +1231,11 @@ void Mission::update(float dt, const MechInput& playerInput) {
             // is what makes a stealth reactor a real way to cross open ground.
             bool visible =
                 world_.lineOfSight(u.hitCentre() + Vec3(0.0f, 0.4f, 0.0f), target);
+            // The lights are out: nothing without its own sensors sees past
+            // a stone's throw. The pilot's radar still works.
+            if (visible && blackout_ > 0.5f && u.team() == Team::Hostile &&
+                lengthSq(target - u.hitCentre()) > 55.0f * 55.0f)
+                visible = false;
             if (visible && u.team() == Team::Hostile) {
                 const bool atPlayer =
                     lengthSq(target - mechs_[0].hitCentre()) < 4.0f;
@@ -1023,8 +1272,9 @@ void Mission::update(float dt, const MechInput& playerInput) {
                 if (!u.alive() || u.team() != Team::Hostile) continue;
                 const float d = length(u.position() - at);
                 if (d > 62.0f) continue;
-                if (u.kind() == UnitKind::Drone) {
-                    u.applyDamage(1e5f);          // out of the sky
+                if (u.kind() == UnitKind::Drone || u.kind() == UnitKind::Sapper) {
+                    u.applyDamage(1e5f);          // out of the sky / the charge fizzles
+                    onUnitKilled(static_cast<int>(&u - &units_[0]));
                 } else {
                     // Two to five seconds of silence, closer means longer.
                     u.suppress(5.0f - 3.0f * clampf(d / 62.0f, 0.0f, 1.0f));
@@ -1092,6 +1342,23 @@ void Mission::update(float dt, const MechInput& playerInput) {
                 }
             }
         }
+
+        // Sappers arriving. The charge is an EMP: forty points of structure,
+        // the fire control knocked sideways, the reactor spiked.
+        for (size_t i = 0; i < units_.size(); ++i) {
+            Unit& u = units_[i];
+            if (!u.alive() || u.kind() != UnitKind::Sapper || !u.armedToBlow()) continue;
+            combat_.explosion(u.hitCentre(), 5.0f, Vec3(0.6f, 0.85f, 1.0f), rng_);
+            mechs_[0].applyDamage(42.0f * enemyDamageScale(level_.power) + 8.0f,
+                                  normalize(mechs_[0].position() - u.position() + Vec3(0.0f, 0.2f, 0.0f)));
+            mechs_[0].applyImpulse(normalize(flattenY(mechs_[0].position() - u.position()) +
+                                             Vec3(1e-3f, 0.0f, 0.0f)) * 3.0f + Vec3(0.0f, 2.5f, 0.0f));
+            jamStrength_ = std::max(jamStrength_, 1.0f);
+            u.applyDamage(1e5f);
+            onUnitKilled(static_cast<int>(i));
+        }
+
+        updateShields();
 
         // Crushing. Walking a ten-metre machine over a power-suit trooper
         // resolves exactly the way it should.
@@ -1192,6 +1459,47 @@ void Mission::update(float dt, const MechInput& playerInput) {
         }
     }
 
+    // ---- set-pieces ---------------------------------------------------------
+    blackout_ = damp(blackout_, blackoutTarget_, 0.6f, dt);
+    if (phase_ == MissionPhase::Fighting) {
+        const ObjectiveSpec* spec = currentObjective();
+        // The creeping barrage: a line of fire walking up the lane behind
+        // the pilot. Ahead of it is a march; behind it is the end.
+        if (spec && spec->kind == ObjectiveKind::Outrun && barrageAlong_ > -1e8f) {
+            barrageAlong_ += spec->barrageSpeed * dt;
+            barrageTimer_ -= dt;
+            if (barrageTimer_ <= 0.0f) {
+                barrageTimer_ = 0.32f;
+                const Vec3 perp(missionAxis_.z, 0.0f, -missionAxis_.x);
+                const Vec3 origin = missionAxis_ * barrageAlong_;
+                // Two shells a beat along the line, and if the pilot is
+                // behind it, one more on them.
+                for (int k = 0; k < 2; ++k)
+                    fireShell(origin + perp * rng_.range(-70.0f, 70.0f) +
+                                  missionAxis_ * rng_.range(-12.0f, 12.0f), 4.0f);
+                const float pAlong = dot(mechs_[0].position(), missionAxis_);
+                if (pAlong < barrageAlong_ + 6.0f) fireShell(mechs_[0].position(), 9.0f);
+            }
+        }
+        // The collapsing crossing: past the middle the charges are armed,
+        // and twenty seconds later the road behind the pilot is gone.
+        if (spec && spec->collapse && !collapsed_) {
+            const float startAlong = dot(checkpointPos_, missionAxis_);
+            const float zoneAlong = dot(objectiveZone_, missionAxis_);
+            const float pAlong = dot(mechs_[0].position(), missionAxis_);
+            const float frac = (zoneAlong - startAlong != 0.0f)
+                ? (pAlong - startAlong) / (zoneAlong - startAlong) : 0.0f;
+            if (collapseTimer_ < 0.0f && frac > 0.45f) collapseTimer_ = 20.0f;
+            if (collapseTimer_ >= 0.0f) {
+                collapseTimer_ -= dt;
+                if (collapseTimer_ <= 0.0f) {
+                    collapseDecksBehind(pAlong - 6.0f);
+                    collapseTimer_ = -1.0f;
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------- mission flow --
     if (phase_ == MissionPhase::Briefing) return;   // nothing resolves yet
     if (phase_ == MissionPhase::Fighting || phase_ == MissionPhase::WaveGap) {
@@ -1259,9 +1567,13 @@ Vec3 Mission::lanePoint(float t, float sweepScale) const {
     Vec3 best = want;
     best.y = world_.terrain().height(want.x, want.z);
     // Widening rings until land turns up; islands can put the nearest dry
-    // ground a fair march from the ideal spot.
+    // ground a fair march from the ideal spot. Within a ring the candidate
+    // NEAREST the ideal spot wins, never the first one found: on a wide
+    // ring the first dry sample could be a hundred metres BACK down the
+    // lane, which put a quarter-way escort zone six metres from the start.
     for (float radius = 10.0f; radius < 140.0f; radius += 18.0f) {
         bool found = false;
+        float bestD = 1e9f;
         for (int tries = 0; tries < 26; ++tries) {
             // Stay near the road on every map. On water maps dry ground far
             // off the lane is an island the causeway does not serve; on land
@@ -1278,13 +1590,18 @@ Vec3 Mission::lanePoint(float t, float sweepScale) const {
             // unreachable for half the leg catalogue, and a mission whose
             // marker cannot be stood on cannot be finished.
             if (world_.terrain().slope(cand.x, cand.z) > 0.38f) continue;
+            // Backwards along the lane costs double: a zone behind the
+            // ideal spot shortens the segment, ahead of it only moves it.
+            const float back = std::max(0.0f, dot(want - cand, missionAxis_));
+            const float d = lengthXZ(cand - want) + back;
+            if (d >= bestD) continue;
+            bestD = d;
             best = cand;
             const SurfaceHit h = world_.findFoothold(cand + Vec3(0.0f, 6.0f, 0.0f),
                                                      Vec3(0.0f, 1.0f, 0.0f),
                                                      4.0f, 14.0f);
             best.y = h.hit ? h.point.y : world_.terrain().height(cand.x, cand.z);
             found = true;
-            break;
         }
         if (found) break;
     }
@@ -1351,7 +1668,9 @@ void Mission::spawnGarrison(const ObjectiveSpec& spec, const Vec3& around) {
     // answer it. Early contracts are now genuinely thin; the late ones fill
     // out to the old numbers, by which point the player has the guns for it.
     const int p = level_.power;
-    const int budget = busy ? std::min(16, 9 + p / 2) : std::min(10, 5 + p / 3);
+    // Wave 15: "a little too easy, little reason to take cover" - the
+    // budget grows by a third and the march segments carry real armour.
+    const int budget = busy ? std::min(20, 12 + p / 2) : std::min(13, 7 + p / 3);
     int troopers = spec.troopers;
     int drones = spec.drones;
     int atTeams = spec.atTeams;
@@ -1397,9 +1716,44 @@ void Mission::spawnGarrison(const ObjectiveSpec& spec, const Vec3& around) {
     // the reason that pocket is hard.
     place(UnitKind::Warden, spec.wardens);
     place(UnitKind::Jammer, spec.jammers);
-    place(UnitKind::ATTrooper, atTeams);
-    place(UnitKind::Trooper, troopers);
+    // Shield pylons stand ON the objective: the pocket around it and the
+    // marked targets in it are untouchable until the pylons fall.
+    for (int i = 0; i < spec.pylons; ++i) {
+        const float ang = TAU * static_cast<float>(i) / std::max(1, spec.pylons) + 0.7f;
+        Vec3 at = around + Vec3(std::sin(ang), 0.0f, std::cos(ang)) * (spec.pylons > 1 ? 22.0f : 6.0f);
+        for (int tries = 0; tries < 10 && world_.insideStructure(at, 2.5f); ++tries)
+            at = around + Vec3(rng_.range(-28.0f, 28.0f), 0.0f, rng_.range(-28.0f, 28.0f));
+        spawnUnit(UnitKind::ShieldPylon, at, 0, Vec3(0.0f));
+        units_.back().teleport(Vec3(at.x, world_.terrain().height(at.x, at.z), at.z));
+    }
+    // In the city the infantry waits in the ALLEYS - against a wall, out of
+    // sight of the road - and comes out when the pilot is past. On open
+    // ground there is nothing to hide behind and they dig in as before.
+    const bool urban = world_.arena().urban;
+    for (int i = 0; i < atTeams; ++i) {
+        const Vec3 c = centre[(next++) % pockets];
+        if (urban) spawnUnit(UnitKind::ATTrooper, hiddenSpot(c, lerp(checkpointPos_, c, 0.6f)), 0, Vec3(0.0f));
+        else spawnUnit(UnitKind::ATTrooper, c, 0, Vec3(0.0f));
+    }
+    for (int i = 0; i < troopers; ++i) {
+        const Vec3 c = centre[(next++) % pockets];
+        if (urban && (i & 1)) spawnUnit(UnitKind::Trooper, hiddenSpot(c, lerp(checkpointPos_, c, 0.6f)), 0, Vec3(0.0f));
+        else spawnUnit(UnitKind::Trooper, c, 0, Vec3(0.0f));
+    }
     place(UnitKind::Drone, drones);
+    // Sappers wait in a pack just off the route and rush when it passes.
+    for (int i = 0; i < spec.sappers; ++i) {
+        const Vec3 c = centre[(i / 3 + 1) % pockets];
+        spawnUnit(UnitKind::Sapper, hiddenSpot(c, lerp(checkpointPos_, c, 0.5f)), 0, Vec3(0.0f));
+    }
+    // Gunships orbit the objective from the start, alerted: they are the
+    // sky, and the sky has no cover.
+    for (int i = 0; i < spec.gunships; ++i) {
+        spawnUnit(UnitKind::Gunship, around + perp * ((i & 1) ? 40.0f : -40.0f), 0, Vec3(0.0f));
+        Unit& g = units_.back();
+        g.teleport(g.position() + Vec3(0.0f, 17.0f, 0.0f));
+        g.forceAlert();
+    }
     // Marksmen and mortars belong BEHIND the line, not in it. Dropped into a
     // pocket they are just fragile riflemen; set back off the lane they are
     // the reason the pocket cannot simply be walked into.
@@ -1414,6 +1768,14 @@ void Mission::spawnGarrison(const ObjectiveSpec& spec, const Vec3& around) {
         spawnUnit(UnitKind::Mortar,
                   base + missionAxis_ * rng_.range(90.0f, 150.0f) +
                       perp * rng_.range(-60.0f, 60.0f), 0, Vec3(0.0f));
+    }
+    // Rocket trucks sit further back still, and they do not stay put.
+    for (int i = 0; i < spec.launchers; ++i) {
+        const Vec3 base = centre[(next++) % pockets];
+        spawnUnit(UnitKind::Launcher,
+                  base + missionAxis_ * rng_.range(120.0f, 180.0f) +
+                      perp * rng_.range(-70.0f, 70.0f), 0, Vec3(0.0f));
+        if (!units_.empty()) units_.back().forceAlert();
     }
     // Turrets guard the objective itself - every other one from a ROOFTOP,
     // where only long guns or a climber can answer it.
@@ -1513,9 +1875,79 @@ void Mission::startObjective(int index) {
         }
     }
 
+    // Set-piece bookkeeping per segment.
+    barrageAlong_ = (spec.kind == ObjectiveKind::Outrun)
+        ? dot(checkpointPos_, missionAxis_) - 28.0f : -1e9f;
+    barrageTimer_ = 0.0f;
+    collapseTimer_ = -1.0f;
+    collapsed_ = false;
+    ambushSprung_ = false;
+    escortAmbushSprung_ = false;
+
     switch (spec.kind) {
+        case ObjectiveKind::KillUnits: {
+            // Every live unit of the named kind near the zone is the target.
+            // The garrison above just spawned them (pylons on the zone, the
+            // towers on the roofs around it).
+            for (size_t i = 0; i < units_.size(); ++i) {
+                const Unit& u = units_[i];
+                if (!u.alive() || u.team() != Team::Hostile || u.kind() != spec.killKind) continue;
+                if (lengthXZ(u.position() - objectiveZone_) > 140.0f) continue;
+                markedUnits_.push_back(static_cast<int>(i));
+            }
+            // Short of the count: stand more of them up.
+            while (static_cast<int>(markedUnits_.size()) < std::max(1, spec.count)) {
+                if (spec.killKind == UnitKind::Turret && spawnTurretOnRoof(objectiveZone_)) {
+                    markedUnits_.push_back(static_cast<int>(units_.size()) - 1);
+                    continue;
+                }
+                spawnUnit(spec.killKind, objectiveZone_, 0, Vec3(0.0f));
+                if (spec.killKind == UnitKind::ShieldPylon) {
+                    Unit& u = units_.back();
+                    u.teleport(Vec3(u.position().x, world_.terrain().height(u.position().x, u.position().z),
+                                    u.position().z));
+                }
+                markedUnits_.push_back(static_cast<int>(units_.size()) - 1);
+            }
+            objectiveTarget_ = static_cast<int>(markedUnits_.size());
+            break;
+        }
         case ObjectiveKind::DestroyMarked:
         case ObjectiveKind::Blackout: {
+            if (spec.gateHealth > 0.0f) {
+                // THE GATE: one armoured slab across the lane at the zone,
+                // built like a bunker and worth a siege. Its shield, if the
+                // segment has pylons, is what the pylons are for.
+                Vec3 pp = objectiveZone_;
+                for (int tries = 0; tries < 8 && world_.insideStructure(pp, 3.0f); ++tries)
+                    pp = objectiveZone_ + Vec3(rng_.range(-20.0f, 20.0f), 0.0f, rng_.range(-20.0f, 20.0f));
+                pp.y = world_.terrain().height(pp.x, pp.z);
+                Destructible d;
+                d.style = PropStyle::GuardShed;
+                d.pos = pp;
+                d.yaw = std::atan2(missionAxis_.x, missionAxis_.z);
+                d.maxHealth = d.health = spec.gateHealth;
+                d.explosive = true;
+                d.blastRadius = 10.0f;
+                d.blastDamage = 40.0f;
+                d.cashValue = 400;
+                d.hitRadius = 5.0f;
+                d.hitHeight = 7.0f;
+                d.ammoChance = 1.0f;
+                Obstacle o;
+                o.center = d.pos + Vec3(0.0f, d.hitHeight * 0.5f, 0.0f);
+                const Vec3 perp(missionAxis_.z, 0.0f, -missionAxis_.x);
+                (void)perp;
+                o.half = Vec3(d.hitRadius, d.hitHeight * 0.5f, d.hitRadius);
+                o.kind = ObstacleKind::Debris;
+                o.climbable = false;
+                d.obstacle = world_.addDynamicObstacle(o);
+                markedProps_.push_back(static_cast<int>(props_.size()));
+                props_.push_back(d);
+                world_.finalizeObstacles();
+                objectiveTarget_ = 1;
+                break;
+            }
             // Purpose-built targets in a ring around the zone, so the thing
             // the briefing named is actually there to be destroyed.
             const int n = std::max(1, spec.count);
@@ -1633,12 +2065,18 @@ void Mission::startObjective(int index) {
 
 void Mission::completeObjective() {
     const ObjectiveSpec& spec = level_.objectives[static_cast<size_t>(objectiveIndex_)];
-    (void)spec;
     ledger_.objectivesDone += 1;
+    // The trap: the zone was the bait.
+    if (spec.ambush && spec.kind != ObjectiveKind::Escort && !ambushSprung_) {
+        ambushSprung_ = true;
+        spawnAmbush(mechs_[0].position());
+    }
+    // The lights go out with this objective and stay out.
+    if (spec.lightsOut) blackoutTarget_ = 1.0f;
     // The backbone of the payout, and now genuinely the backbone: with the
     // wrecking economy and the kill bounties cut back to seasoning, what a
     // contract pays is what the contract was FOR.
-    const int bonus = 58 + level_.power * 19;
+    const int bonus = pay(58 + level_.power * 19);
     ledger_.cashObjectives += bonus;
     cashEarned_ += bonus;
 
@@ -1669,7 +2107,7 @@ void Mission::completeObjective() {
                 }
             }
         if (!anyLeft) {
-            const int clearPay = 70 + level_.power * 26;
+            const int clearPay = pay(70 + level_.power * 26);
             ledger_.cashClearance += clearPay;
             ledger_.sectorsCleared += 1;
             cashEarned_ += clearPay;
@@ -1701,7 +2139,7 @@ void Mission::completeObjective() {
         // nothing at double par. Kept simple enough to read on the debrief.
         const float par = 115.0f * static_cast<float>(objectiveCount());
         const float frac = clampf(2.0f - elapsed_ / par, 0.0f, 1.0f);
-        ledger_.cashTimeBonus = static_cast<int>(frac * (55.0f + 15.0f * level_.power));
+        ledger_.cashTimeBonus = pay(static_cast<int>(frac * (55.0f + 15.0f * level_.power)));
         cashEarned_ += ledger_.cashTimeBonus + level_.completionBonus;
         ledger_.missionTime = elapsed_;
     }
@@ -1735,8 +2173,8 @@ void Mission::onUnitKilled(int idx) {
     // being paid to shoot scenery and hid the fact that clearing ground units
     // was already most of a mission's income - a mislabel that cost a whole
     // round of economy tuning aimed at the wrong number.
-    ledger_.cashKills += st.bounty;
-    cashEarned_ += st.bounty;
+    ledger_.cashKills += pay(st.bounty);
+    cashEarned_ += pay(st.bounty);
     // Vehicles leave usable ammunition. Armour is a reliable resupply now;
     // even AT teams cough up a rocket sometimes.
     const bool armour = (u.kind() == UnitKind::APC || u.kind() == UnitKind::Tank ||
@@ -1791,8 +2229,8 @@ void Mission::onPropKilled(int idx) {
         d.deadAge = 0.0f;
     }
     ledger_.propsDestroyed += 1;
-    ledger_.cashDestruction += d.cashValue;
-    cashEarned_ += d.cashValue;
+    ledger_.cashDestruction += pay(d.cashValue);
+    cashEarned_ += pay(d.cashValue);
 
     combat_.explosion(d.hitCentre(), d.explosive ? d.blastRadius * 0.6f : 1.6f,
                       d.explosive ? Vec3(1.0f, 0.55f, 0.2f) : Vec3(0.9f, 0.85f, 0.7f),
@@ -1951,6 +2389,23 @@ void Mission::updateObjective(float dt) {
             }
             break;
         }
+        case ObjectiveKind::KillUnits: {
+            int down = 0;
+            for (int i : markedUnits_)
+                if (!units_[static_cast<size_t>(i)].alive()) ++down;
+            objectiveProgress_ = down;
+            if (down >= objectiveTarget_) completeObjective();
+            break;
+        }
+        case ObjectiveKind::Outrun: {
+            // Reach the far end before the fire does. Being behind the line
+            // is survivable for a few seconds and fatal for many.
+            const float zoneAlong2 = dot(objectiveZone_, missionAxis_);
+            const float pAlong2 = dot(playerPos, missionAxis_);
+            objectiveProgress_ = static_cast<int>(std::max(0.0f, pAlong2 - barrageAlong_));
+            if (toZone < spec.zoneRadius || pAlong2 >= zoneAlong2 - 4.0f) completeObjective();
+            break;
+        }
         case ObjectiveKind::ReachZone:
         case ObjectiveKind::Breakthrough: {
             // Crossing the LINE is the objective, not parking on a coin: the
@@ -1997,6 +2452,19 @@ void Mission::updateObjective(float dt) {
         case ObjectiveKind::Escort: {
             if (escortUnit_ < 0) { completeObjective(); break; }
             Unit& escM = units_[static_cast<size_t>(escortUnit_)];
+            // The reverse: halfway across, the road ahead of the crawler
+            // fills with the people who let it get this far.
+            if (spec.ambush && !escortAmbushSprung_) {
+                const float startAlong = dot(checkpointPos_, missionAxis_);
+                const float zoneAlong = dot(objectiveZone_, missionAxis_);
+                const float eAlong = dot(escM.position(), missionAxis_);
+                const float frac = (zoneAlong - startAlong != 0.0f)
+                    ? (eAlong - startAlong) / (zoneAlong - startAlong) : 0.0f;
+                if (frac > 0.5f) {
+                    escortAmbushSprung_ = true;
+                    spawnAmbush(escM.position() + missionAxis_ * 30.0f);
+                }
+            }
             // The crawler does not outrun its own protection. When the player
             // falls behind it creeps, which is what turns "the AI drove into
             // the guns and died" into an escort the player can actually do.
@@ -2162,6 +2630,10 @@ void Mission::updateObjective(float dt) {
 }
 
 void Mission::settle(PlayerProfile& profile) const {
+    // A bounty elite's weapon is kept whether or not the contract closed:
+    // it was pulled off the wreck, not paid out.
+    if (!ledger_.salvagedPart.empty() && !profile.hasUnlocked(ledger_.salvagedPart))
+        profile.unlocked.push_back(ledger_.salvagedPart);
     if (phase_ != MissionPhase::Cleared) {
         // A failed attempt still pays for what you actually destroyed, at a
         // reduced rate. Paying nothing sounds like the right punishment until
@@ -2195,7 +2667,7 @@ void Mission::settle(PlayerProfile& profile) const {
     profile.deaths += ledger_.checkpointDeaths;
     for (size_t i = 1; i < mechs_.size(); ++i)
         if (!mechs_[i].alive()) profile.kills += 1;
-    for (int i = 0; i < 6; ++i) profile.kills += ledger_.unitKills[i];
+    for (int i = 0; i < kUnitKindCount && i < 16; ++i) profile.kills += ledger_.unitKills[i];
     if (profile.level > profile.maxCleared) profile.maxCleared = profile.level;
 
     // Bank the magazines still in the player's racks, so salvage picked up on

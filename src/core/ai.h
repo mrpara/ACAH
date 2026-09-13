@@ -55,6 +55,11 @@ struct AiConfig {
     // it has been in the open long enough for the player to answer, it leaves
     // and sets up somewhere else. Zero disables the behaviour entirely.
     float exposureLimit = 0.0f;   // seconds of being shootable before it moves
+    // How fast the aim error grows with distance, in metres of scatter per
+    // metre of range. A line unit hoses; a marksman's whole identity is that
+    // this number is small, which is what lets it be dangerous from a place
+    // its target cannot answer from.
+    float aimSpread = 0.16f;
 };
 
 AiConfig configFor(Archetype a, float difficulty, Rng& rng);
@@ -63,6 +68,10 @@ AiConfig configFor(Archetype a, float difficulty, Rng& rng);
 class AiController {
 public:
     void init(const AiConfig& cfg, uint32_t seed);
+    // A stalker keeps its own counsel: it is NEVER ordered to close, and the
+    // campaign's silence rules leave it alone for far longer, because being
+    // out of contact is its whole method rather than a stall.
+    bool isStalker() const { return cfg_.exposureLimit > 0.0f; }
 
     // Produces the input for `self` this frame. `target` may be null or dead,
     // in which case the machine idles.
@@ -90,6 +99,8 @@ private:
 
     float stateTimer_ = 0.0f;
     float decisionTimer_ = 0.0f;
+    float sinceDecision_ = 0.0f;    // seconds since chooseState last ran
+    float decisionDt_ = 0.3f;       // what the current decision covers
     float strafeSign_ = 1.0f;
     float strafeTimer_ = 0.0f;
     float fireHold_ = 0.0f;
@@ -117,6 +128,19 @@ private:
     // used last, so it never sets up on the same roof twice running.
     float exposure_ = 0.0f;
     Vec3 breakTo_{0.0f, 0.0f, 0.0f};
+    // The ground sniper loop (stalker). A firing position with cover next
+    // to it; how long it has held it, what it arrived with, and where it
+    // ducks when it leaves. `hideTimer_` is the wait out of sight.
+    Vec3 firePos_{0.0f, 0.0f, 0.0f};
+    Vec3 coverPos_{0.0f, 0.0f, 0.0f};
+    Vec3 lastFirePos_{0.0f, 0.0f, 0.0f};
+    bool hasFirePos_ = false;
+    bool hasLastFirePos_ = false;
+    float dwell_ = 0.0f;
+    float arriveHealth_ = 1.0f;
+    float hideTimer_ = 0.0f;
+    float sinceShot_ = 99.0f;
+    float lastHealth_ = 1.0f;
     Vec3 lastPerch_{0.0f, 0.0f, 0.0f};
     bool hasLastPerch_ = false;
     Vec3 failedClimb_{0.0f, 0.0f, 0.0f};   // a face this machine could not get up
@@ -124,6 +148,9 @@ private:
     int climbFails_ = 0;                    // consecutive failed ascents
     float climbStall_ = 0.0f;               // seconds pressed at a face, going nowhere
     Vec3 pickBreakPoint(const World& world, const Mech& self, const Mech& target);
+    // A long-range firing spot with a building to duck behind. Fills
+    // firePos_/coverPos_; returns false if nothing usable was found.
+    bool pickFirePosition(const World& world, const Mech& self, const Mech& target);
     bool hunting_ = false;
     bool haveSeen_ = false;
 };

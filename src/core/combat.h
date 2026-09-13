@@ -17,6 +17,41 @@
 namespace sb {
 
 // A live round in flight.
+// Every round is pulled down. A weapon may ask for MORE - a mortar arcs
+// hard on purpose - but none of them are exempt, and that one rule is what
+// gives the guns different useful distances without a single range table:
+// drop is half g times the flight time squared, flight time is the range
+// over the muzzle velocity, so a 900 m/s slug falls a foot at two hundred
+// metres and a 150 m/s autocannon shell falls five metres. Slow guns are
+// brawling weapons; fast ones reach.
+constexpr float kShotGravity = -9.8f;
+// A missile is under power the whole way and only sags; it does not fall
+// like a shell. Without this a forty-metre-a-second anti-tank missile would
+// have to be lobbed at forty-five degrees to reach two hundred metres, which
+// is a mortar, not a missile.
+constexpr float kMissileGravity = -2.2f;
+
+// What actually pulls this round down: the weapon's own arc if it asks for a
+// stronger one, otherwise gravity - or a missile's much gentler sag.
+inline float shotGravity(const WeaponDef& w) {
+    const float base = w.homingCapable ? kMissileGravity : kShotGravity;
+    return (w.gravity < base) ? w.gravity : base;
+}
+
+// The direction to fire a round of the given muzzle speed so that it ARRIVES
+// at `target`. Two passes: the first guesses the flight time from the
+// straight-line distance, the second from the lofted one, which is close
+// enough at any distance a gun in here can reach.
+Vec3 ballisticAim(const Vec3& muzzle, const Vec3& target, float speed, float gravity);
+
+// How far a round of this speed falls over `distance`. Used to put a mark on
+// the sight where the shot will actually land.
+inline float ballisticDrop(float distance, float speed, float gravity) {
+    if (speed < 1e-3f) return 0.0f;
+    const float t = distance / speed;
+    return -gravity * 0.5f * t * t;
+}
+
 struct Projectile {
     Vec3 pos{0.0f, 0.0f, 0.0f};
     Vec3 prev{0.0f, 0.0f, 0.0f};     // last frame's position, for swept hit tests

@@ -11,14 +11,18 @@ void Terrain::generate(const TerrainProfile& profile, uint32_t seed, float exten
     tileSize_ = tileSize;
     vertexStep_ = vertexStep;
     tiles_.clear();
+    coarseTiles_.clear();
     tileCenters_.clear();
     tileRadius_ = 0.0f;
 
     const int tilesPerSide = std::max(1, static_cast<int>(std::ceil((extent_ * 2.0f) / tileSize_)));
-    const int quads = std::max(1, static_cast<int>(std::round(tileSize_ / vertexStep_)));
-    const float step = tileSize_ / quads;
+    const int fullQuads = std::max(1, static_cast<int>(std::round(tileSize_ / vertexStep_)));
+    // Far-field tiles: three quads a side (seven-metre vertices on the
+    // standard tile), a fifth of the triangles.
+    const int coarseQuads = std::max(1, std::min(3, fullQuads));
 
     tiles_.reserve(static_cast<size_t>(tilesPerSide) * tilesPerSide);
+    coarseTiles_.reserve(tiles_.capacity());
     tileCenters_.reserve(tiles_.capacity());
 
     for (int tz = 0; tz < tilesPerSide; ++tz) {
@@ -26,6 +30,9 @@ void Terrain::generate(const TerrainProfile& profile, uint32_t seed, float exten
             const float ox = -extent_ + tx * tileSize_;
             const float oz = -extent_ + tz * tileSize_;
 
+          for (int level = 0; level < 2; ++level) {
+            const int quads = (level == 0) ? fullQuads : coarseQuads;
+            const float step = tileSize_ / quads;
             Mesh tile;
             tile.verts.reserve(static_cast<size_t>(quads + 1) * (quads + 1));
             for (int j = 0; j <= quads; ++j) {
@@ -59,9 +66,17 @@ void Terrain::generate(const TerrainProfile& profile, uint32_t seed, float exten
                 }
             }
             tile.computeBounds();
-            tileCenters_.push_back(tile.boundsCenter);
-            tileRadius_ = std::max(tileRadius_, tile.boundsRadius);
-            tiles_.push_back(std::move(tile));
+            if (level == 0) {
+                tileCenters_.push_back(tile.boundsCenter);
+                tileRadius_ = std::max(tileRadius_, tile.boundsRadius);
+                tiles_.push_back(std::move(tile));
+            } else {
+                // Sit the far tile a touch low so any seam against a full
+                // tile shows ground, never sky, through the T-junction.
+                for (Vertex& v : tile.verts) v.pos.y -= 0.12f;
+                coarseTiles_.push_back(std::move(tile));
+            }
+          }
         }
     }
 }

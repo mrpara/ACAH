@@ -46,6 +46,7 @@ AiConfig configFor(Archetype a, float difficulty, Rng& rng) {
             c.preferredRange = 95.0f; c.rangeTolerance = 24.0f;
             c.strafeBias = 0.35f;
             c.accuracy = clampf(c.accuracy + 0.05f, 0.0f, 0.96f);
+            c.aimSpread = 0.055f;
             break;
         case Archetype::Lancer:
             c.preferredRange = 34.0f; c.rangeTolerance = 18.0f;
@@ -71,7 +72,15 @@ AiConfig configFor(Archetype a, float difficulty, Rng& rng) {
             c.preferredRange = 105.0f; c.rangeTolerance = 38.0f;
             c.strafeBias = 0.8f;
             c.aggression *= 0.70f;
-            c.accuracy = clampf(c.accuracy + 0.10f, 0.0f, 0.93f);
+            // It is a MARKSMAN. The generic gunnery model scatters by a
+            // sixth of a metre per metre of range, which at the two hundred
+            // metres this thing likes is a thirty-metre group - wider than
+            // the cone its own trigger gate will open for, so the old
+            // stalker stood on its roof holding fire and, when it did shoot,
+            // could not have hit. A tenth of that, and a floor under the
+            // hand, is the difference between a sniper and a scarecrow.
+            c.accuracy = clampf(std::max(c.accuracy + 0.10f, 0.80f), 0.0f, 0.94f);
+            c.aimSpread = 0.018f;
             c.reactionTime *= 0.75f;
             c.willClimb = true;
             c.exposureLimit = lerpf(4.6f, 2.8f, d);
@@ -121,6 +130,21 @@ Vec3 AiController::pickClimbTarget(const World& world, const Mech& self,
         // shoot over a district, and a six-metre block gives it neither the
         // sightline nor the cover the whole behaviour depends on.
         if (h < (stalker ? 10.0f : 6.0f)) continue;
+        // ...and not a skyscraper either. A gun that only depresses 38
+        // degrees cannot reach the street from fifty metres up, and neither
+        // can the pilot get back DOWN from there without a fall that costs
+        // more structure than the machine has: measured, a stalker that
+        // picked a fifty-metre tower died of its own descent one fight in
+        // four. Ten to thirty-four metres is the band where the behaviour
+        // actually works.
+        if (stalker && h > 34.0f) continue;
+        // And the same limit measured from the GROUND, because a thirty-metre
+        // block standing on a twenty-metre podium is a fifty-metre fall like
+        // any other, and the machine will happily hop from roof to roof until
+        // it is somewhere it cannot come down from.
+        if (stalker && (o.center.y + o.half.y) -
+                           world.terrain().height(o.center.x, o.center.z) > 36.0f)
+            continue;
         const float dSelf = lengthXZ(o.center - self.position());
         if (dSelf > (stalker ? 160.0f : 70.0f)) continue;
         const float dTarget = lengthXZ(o.center - target.position());
@@ -204,6 +228,62 @@ Vec3 AiController::pickBreakPoint(const World& world, const Mech& self,
     return best;
 }
 
+bool AiController::pickFirePosition(const World& world, const Mech& self,
+                                    const Mech& target) {
+    // Sample a ring of spots around the target at sniping range and score
+    // each on the three things a marksman wants: a line to the target from
+    // there, a wall a few strides away that BREAKS that line (cover), and
+    // not too far a walk from here. A hurt machine pushes the ring out.
+    const float hp = self.healthFraction();
+    const float rMin = hp < 0.45f ? 190.0f : 140.0f;
+    const float rMax = hp < 0.45f ? 300.0f : 240.0f;
+    const Vec3 tPos = target.hitCentre();
+    const Vec3 selfPos = self.position();
+    const float extent = world.extent() - 20.0f;
+    float bestScore = -1e9f;
+    Vec3 bestFire, bestCover;
+    bool found = false;
+    const int kCand = 28;
+    for (int i = 0; i < kCand; ++i) {
+        const float a = rng_.range(0.0f, TAU);
+        const float r = rng_.range(rMin, rMax);
+        Vec3 c = tPos + Vec3(std::cos(a) * r, 0.0f, std::sin(a) * r);
+        if (std::fabs(c.x) > extent || std::fabs(c.z) > extent) continue;
+        c.y = world.terrain().height(c.x, c.z);
+        if (world.hasWater() && c.y < world.waterLevel() + 0.5f) continue;
+        if (world.terrain().slope(c.x, c.z) > 0.40f) continue;
+        if (world.insideSolid(c + Vec3(0.0f, 2.0f, 0.0f), 2.2f)) continue;
+        if (world.insideStructure(c, 1.0f)) continue;
+        const Vec3 eye = c + Vec3(0.0f, 2.6f, 0.0f);
+        if (!world.lineOfSight(eye, tPos)) continue;      // must be able to shoot
+        // Cover: a spot within 14 m from which the target is NOT visible,
+        // reachable without crossing the target's line.
+        bool cover = false;
+        Vec3 coverAt = c;
+        for (int k = 0; k < 8 && !cover; ++k) {
+            const float ca = (static_cast<float>(k) / 8.0f) * TAU;
+            for (float d = 6.0f; d <= 14.0f; d += 4.0f) {
+                Vec3 cp = c + Vec3(std::cos(ca) * d, 0.0f, std::sin(ca) * d);
+                cp.y = world.terrain().height(cp.x, cp.z);
+                if (world.insideSolid(cp + Vec3(0.0f, 2.0f, 0.0f), 2.0f)) continue;
+                if (world.insideStructure(cp, 1.0f)) continue;
+                if (!world.lineOfSight(cp + Vec3(0.0f, 2.6f, 0.0f), tPos)) { cover = true; coverAt = cp; break; }
+            }
+        }
+        const float walk = lengthXZ(c - selfPos);
+        float score = 40.0f + (cover ? 35.0f : 0.0f) - walk * 0.35f;
+        // Prefer the far side of the ring when hurt, the middle otherwise.
+        score -= std::fabs(r - (hp < 0.45f ? rMax * 0.9f : (rMin + rMax) * 0.5f)) * 0.08f;
+        if (hasLastFirePos_ && lengthXZ(c - lastFirePos_) < 60.0f) score -= 30.0f;
+        if (score > bestScore) { bestScore = score; bestFire = c; bestCover = coverAt; found = true; }
+    }
+    if (!found) return false;
+    firePos_ = bestFire;
+    coverPos_ = bestCover;
+    hasFirePos_ = true;
+    return true;
+}
+
 void AiController::chooseState(const World& world, const Mech& self,
                                const Mech& target, float range, bool visible) {
     const float near = cfg_.preferredRange - cfg_.rangeTolerance;
@@ -235,161 +315,201 @@ void AiController::chooseState(const World& world, const Mech& self,
     const bool targetIsUp = elevation > deg2rad(38.0f);
 
     // ---- the stalker's loop ------------------------------------------------
-    // Climb -> perch -> shoot -> get seen -> break contact -> climb something
-    // else. Everything else in this file is about holding a position; this is
-    // about refusing to. It is written before the general rules because the
-    // general rules would talk it into standing and trading.
-    if (cfg_.exposureLimit > 0.0f && self.stats().canClimbWalls) {
+    // A marksman working the district: pick a firing position at long range
+    // with a wall to duck behind, walk to it, shoot until either the enemy
+    // has been looking at it for a few seconds or a chunk of hull is gone,
+    // duck behind the wall, wait out of sight, pick somewhere ELSE. A roof
+    // is one kind of firing position when a tower is handy. It is never
+    // still for long, and when hurt it opens the range and hides longer.
+    // Written before the general rules because the general rules would
+    // talk it into standing and trading.
+    if (cfg_.exposureLimit > 0.0f) {
+        const bool hurt = hp < 0.45f;
         const bool elevated =
             self.position().y >
             world.terrain().height(self.position().x, self.position().z) + 7.0f;
+        // Damage taken since the last decision is what a sniper reacts to.
+        const float bitten = std::max(0.0f, lastHealth_ - hp);
+        lastHealth_ = hp;
+
+        auto leave = [&](float hideFor) {
+            hasLastFirePos_ = true;
+            lastFirePos_ = self.position();
+            lastPerch_ = self.position();
+            hasLastPerch_ = true;
+            // Duck to the cover picked with the position, or find one now.
+            if (!hasFirePos_ || lengthXZ(coverPos_ - self.position()) > 40.0f)
+                coverPos_ = pickBreakPoint(world, self, target);
+            breakTo_ = coverPos_;
+            state_ = AiState::Break;
+            stateTimer_ = 7.0f;
+            hideTimer_ = hideFor;
+            exposure_ = 0.0f;
+        };
+        auto nextPosition = [&]() {
+            // A tower now and then, if one is in reach; otherwise ground.
+            // A tower is the POINT of this machine, not a flourish it tries
+            // one time in three. It goes up whenever there is anything to go
+            // up, and a couple of bad attempts stand it down for a while
+            // rather than for the rest of the fight - the old counter never
+            // reset outside a successful climb, so two snagged ascents
+            // turned the rooftop sniper into a man with a rifle in a street.
+            if (self.stats().canClimbWalls && climbFails_ < 3) {
+                climbTarget_ = pickClimbTarget(world, self, target);
+                if (hasClimbTarget_) {
+                    state_ = AiState::Climb;
+                    // Twenty-five metres of wall at a third of walking pace
+                    // is not an eleven-second job.
+                    stateTimer_ = 22.0f;
+                    climbStall_ = 0.0f;
+                    return;
+                }
+            }
+            if (pickFirePosition(world, self, target)) {
+                state_ = AiState::Approach;
+                stateTimer_ = 14.0f;
+            } else {
+                // Nowhere to snipe from: open the range and try again shortly.
+                breakTo_ = pickBreakPoint(world, self, target);
+                state_ = AiState::Break;
+                stateTimer_ = 4.0f;
+                hideTimer_ = 1.0f;
+            }
+        };
+
+        if (state_ == AiState::Idle) {
+            // The mission puts this thing on a tower on purpose. Walking
+            // straight off it to look for somewhere to shoot from was both
+            // the first thing it ever did and a twenty-five metre fall: if
+            // it is already up, it is already where it wants to be.
+            if (elevated) {
+                state_ = AiState::Perch;
+                stateTimer_ = 26.0f;
+                dwell_ = 0.0f;
+                exposure_ = 0.0f;
+                arriveHealth_ = hp;
+                climbFails_ = 0;
+                return;
+            }
+            nextPosition();
+            return;
+        }
 
         if (state_ == AiState::Break) {
-            // Running for cover. Done when out of sight, or under it, or when
-            // the run has taken long enough that hiding has become skulking.
-            if ((!visible && lostSight_ > 0.7f) || stateTimer_ <= 0.0f) {
-                climbTarget_ = pickClimbTarget(world, self, target);
-                state_ = hasClimbTarget_ ? AiState::Climb : AiState::Approach;
-                stateTimer_ = 11.0f;
+            // Running for the wall. Once out of sight (or there), hide.
+            const bool there = lengthXZ(breakTo_ - self.position()) < 5.0f;
+            if ((!visible && lostSight_ > 0.5f) || there || stateTimer_ <= 0.0f) {
+                state_ = AiState::Retreat;
+                stateTimer_ = hideTimer_ * (hurt ? 1.8f : 1.0f);
+            }
+            return;
+        }
+        if (state_ == AiState::Retreat) {
+            // Hiding. If the enemy walks round the wall, keep going; when the
+            // wait is up, set up again somewhere else.
+            if (visible && range < 60.0f) {
+                breakTo_ = pickBreakPoint(world, self, target);
+                stateTimer_ = std::max(stateTimer_, 2.5f);
+                state_ = AiState::Break;
+                hideTimer_ = 2.0f;
+                return;
+            }
+            // Seen from further off while "hiding": the wall is no wall.
+            // Give up on it and set up again somewhere else.
+            if (visible && lostSight_ < 0.2f && stateTimer_ < hideTimer_ * 0.7f) { nextPosition(); return; }
+            if (stateTimer_ <= 0.0f) nextPosition();
+            return;
+        }
+        if (state_ == AiState::Approach) {
+            // Walking to the firing position. Arrive -> Engage. Caught in
+            // the open on the way (hit hard, or the enemy close) -> leave.
+            if (lengthXZ(firePos_ - self.position()) < 6.0f) {
+                state_ = AiState::Engage;
+                stateTimer_ = 30.0f;
+                dwell_ = 0.0f;
                 exposure_ = 0.0f;
+                arriveHealth_ = hp;
+                return;
+            }
+            if (range < 38.0f || bitten > 0.10f || stateTimer_ <= 0.0f) { leave(2.0f); return; }
+            return;
+        }
+        if (state_ == AiState::Engage) {
+            // Shooting from the position. Exposure counts while the enemy
+            // can see it; a bite of more than 12% of the hull since arriving
+            // ends the stay at once; and nothing holds a spot past 12 s.
+            dwell_ += decisionDt_;
+            exposure_ += visible ? decisionDt_ : -(decisionDt_) * 0.5f;
+            exposure_ = std::max(exposure_, 0.0f);
+            const bool bled = (arriveHealth_ - hp) > 0.12f;
+            // Close enough that the enemy's own guns are accurate. Further
+            // out it is winning the exchange and should keep shooting.
+            const bool closing = range < 55.0f;
+            if (exposure_ > cfg_.exposureLimit + 2.0f || bled || closing || dwell_ > 12.0f) {
+                leave(hurt ? 4.0f : rng_.range(1.5f, 3.0f));
+                return;
             }
             return;
         }
 
         if (state_ == AiState::Perch) {
-            // Being looked at is what costs. Out of sight the clock winds back
-            // down, so a stalker the player has lost will settle in and keep
-            // shooting from the same roof - which is what makes finding it
-            // matter.
-            exposure_ += visible ? decisionTimer_ + 0.05f : -(decisionTimer_ + 0.05f);
+            // Being SEEN from four hundred metres is not exposure - it is the
+            // job. What costs a sniper its position is being seen from
+            // somewhere that can shoot back, and the old rule counted every
+            // second of eye contact at any distance, so the machine spent
+            // the whole fight climbing down off towers it had just climbed.
+            const bool answerable = visible && range < cfg_.preferredRange * 1.1f;
+            exposure_ += answerable ? decisionDt_ : -(decisionDt_);
             exposure_ = std::max(exposure_, 0.0f);
-            // "Cornered" is not about distance, it is about whether the gun
-            // still reaches. Once the player is close enough that the shot
-            // would need more depression than the turret has, this roof has
-            // stopped being a firing position and is just a box the machine
-            // is standing in.
+            dwell_ += decisionDt_;
             const Vec3 down = target.hitCentre() - self.hitCentre();
             const float depress = -std::atan2(down.y, std::max(lengthXZ(down), 1.0f));
             const bool cornered = range < 26.0f || depress > deg2rad(34.0f);
-            if (exposure_ > cfg_.exposureLimit || cornered || !elevated) {
+            const bool bled = (arriveHealth_ - hp) > 0.15f;
+            // ...and a perch it is not being hurt on is worth holding for a
+            // good deal longer than a spot in the street.
+            if (exposure_ > cfg_.exposureLimit || cornered || !elevated || bled || dwell_ > 34.0f) {
                 lastPerch_ = self.position();
                 hasLastPerch_ = true;
                 breakTo_ = pickBreakPoint(world, self, target);
                 state_ = AiState::Break;
                 stateTimer_ = 5.5f;
+                hideTimer_ = 2.0f;
                 return;
             }
             return;
         }
 
-        if (state_ == AiState::Engage) {
-            // Grounded gunnery after the towers let it down: hold the range
-            // and shoot like a sniper until the timer says try the roofs
-            // again. Without this a stalker with no usable wall in reach
-            // walked in circles between Climb and Approach and never fought.
-            if (stateTimer_ > 0.0f) {
-                if (range < 30.0f) {
-                    breakTo_ = pickBreakPoint(world, self, target);
-                    state_ = AiState::Break;
-                    stateTimer_ = 6.0f;
-                }
-                return;
-            }
-            climbFails_ = 0;
-        }
-
         if (state_ == AiState::Climb) {
-            // Up and in position: settle and start shooting.
             if (elevated && !self.onWall()) {
                 state_ = AiState::Perch;
                 exposure_ = 0.0f;
+                dwell_ = 0.0f;
+                arriveHealth_ = hp;
                 stateTimer_ = 20.0f;
                 climbFails_ = 0;
                 return;
             }
-            // Getting nowhere. Three seconds pressed at a face with no
-            // daylight under the machine means this face is not going to
-            // work; remember it, and either try another or - after two of
-            // those - fight from the street for a while instead.
             const float climbed = self.position().y -
                                   world.terrain().height(self.position().x,
                                                          self.position().z);
             const bool atFace = lengthXZ(climbTarget_ - self.position()) < 6.0f;
-            if (atFace) climbStall_ += decisionTimer_ + 0.05f;
+            if (atFace) climbStall_ += decisionDt_;
             else climbStall_ = 0.0f;
-            if (climbStall_ > 3.0f && climbed < 3.5f && !self.onWall()) {
+            const bool started = climbed > 4.0f;
+            if ((climbStall_ > 3.0f && climbed < 3.5f && !self.onWall()) ||
+                (range < 18.0f && !elevated && !started) || stateTimer_ <= 0.0f) {
                 failedClimb_ = climbCentre_;
                 hasFailedClimb_ = true;
                 climbStall_ = 0.0f;
-                if (++climbFails_ >= 2) {
-                    state_ = AiState::Engage;
-                    stateTimer_ = 16.0f;
-                    return;
-                }
-                climbTarget_ = pickClimbTarget(world, self, target);
-                if (!hasClimbTarget_) {
-                    state_ = AiState::Engage;
-                    stateTimer_ = 16.0f;
-                }
-                stateTimer_ = std::max(stateTimer_, 11.0f);
+                ++climbFails_;
+                leave(2.0f);
                 return;
             }
-            // Abandon a climb the enemy has caught. Half way up a wall is the
-            // most helpless a machine can be - no evasion, no elevation, both
-            // hands busy - and a stalker that commits to the ascent while the
-            // player closes to knife range simply dies on the face of the
-            // building. Better to drop off and run.
-            // ...but only if the ascent has not actually started. Once there
-            // is daylight under the machine, UP is the escape - bailing out
-            // then just drops it back into the fight it was leaving.
-            const bool started = (self.position().y -
-                                  world.terrain().height(self.position().x,
-                                                         self.position().z)) > 4.0f;
-            if (range < 18.0f && !elevated && !started) {
-                breakTo_ = pickBreakPoint(world, self, target);
-                state_ = AiState::Break;
-                stateTimer_ = 6.0f;
-                return;
-            }
-            if (stateTimer_ > 0.0f) return;
-            // The climb timed out without a perch: that is a failure too.
-            failedClimb_ = climbCentre_;
-            hasFailedClimb_ = true;
-            if (++climbFails_ >= 2) {
-                state_ = AiState::Engage;
-                stateTimer_ = 16.0f;
-                return;
-            }
-            state_ = AiState::Approach;
             return;
         }
-
-        // Never start a climb with the enemy on top of you. A machine part way
-        // up a wall is a machine that cannot shoot, cannot dodge and cannot
-        // get down, and a player who simply walks into it pins it against the
-        // face and kills it there - which is exactly what happened before this
-        // check existed. Open the range first; the tower will still be there.
-        if (range < 34.0f && !elevated) {
-            breakTo_ = pickBreakPoint(world, self, target);
-            state_ = AiState::Break;
-            stateTimer_ = 6.0f;
-            return;
-        }
-
-        // On the ground and not committed to anything: get high. Failing that,
-        // walk toward the player until a tower is in reach.
-        climbTarget_ = pickClimbTarget(world, self, target);
-        if (hasClimbTarget_) {
-            state_ = AiState::Climb;
-            stateTimer_ = 11.0f;
-            climbStall_ = 0.0f;
-        } else {
-            // No tower in reach: shoot from the ground rather than walk at
-            // the player hoping one turns up. The Engage timer sends it back
-            // to looking for roofs later.
-            state_ = AiState::Engage;
-            stateTimer_ = 12.0f;
-        }
+        // Any other state (a generic Retreat from the hurt rule, etc.): reset.
+        nextPosition();
         return;
     }
 
@@ -480,11 +600,18 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
     // fight never starts.
     if (!haveSeen_) lastKnown_ = targetPos;
 
-    if (hunting_) {
+    sinceDecision_ += dt;
+    if (hunting_ && !isStalker()) {
         // Hunting overrides everything: walk at the target and keep walking.
         state_ = AiState::Approach;
         decisionTimer_ = 0.25f;
     } else if (decisionTimer_ <= 0.0f) {
+        // The time this decision covers: the exposure and dwell clocks in
+        // chooseState add it. (They used to add the timer's leftover, which
+        // is ~0 at this point - so a perched stalker's exposure clock barely
+        // moved and it sat on its roof "mostly stationary".)
+        decisionDt_ = std::max(sinceDecision_, 0.05f);
+        sinceDecision_ = 0.0f;
         chooseState(world, self, target, range, visible);
         decisionTimer_ = cfg_.reactionTime * rng_.range(0.8f, 1.3f);
     }
@@ -526,8 +653,26 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
     };
 
 
+    const bool stalker = isStalker();
     switch (state_) {
         case AiState::Approach: {
+            if (stalker && hasFirePos_) {
+                // To the firing position, not to the enemy. Off a roof at
+                // walking pace, not at a sprint: the firing position it is
+                // walking to is on the ground, the way down is over a
+                // parapet, and the descend flag the commit below sets only
+                // takes hold if the machine is still deciding to go rather
+                // than already in the air. A stalker that sprints off a
+                // fifty-metre tower kills itself, which it used to do
+                // roughly once in four fights.
+                const Vec3 d = flattenY(firePos_ - selfPos);
+                move = (lengthSq(d) > 1.0f) ? normalize(d) : Vec3(0.0f);
+                const float ground = world.terrain().height(selfPos.x, selfPos.z);
+                const bool high = selfPos.y - ground > 6.0f;
+                throttle = (high && lengthSq(move) > 1e-4f && !footingAlong(move))
+                               ? 0.45f : 1.0f;
+                break;
+            }
             // While hunting, head for where the target actually is. Hunting is
             // the campaign's answer to a fight that has stopped happening, so
             // it deliberately ignores what this machine can see.
@@ -544,6 +689,15 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
             break;
         }
         case AiState::Engage: {
+            if (stalker) {
+                // Holding the firing position: a slow shuffle of a couple of
+                // metres either way so it is never a still silhouette, and
+                // a step back toward the spot if it has drifted.
+                const Vec3 back = flattenY(firePos_ - selfPos);
+                if (length(back) > 3.5f) { move = normalize(back); throttle = 0.6f; }
+                else { move = right * strafeSign_; throttle = 0.22f; }
+                break;
+            }
             // Every machine is assigned its own bearing around the target and
             // drifts slowly along it. Without this they all converge on the
             // same arc and a group of four can be covered by one burst; with
@@ -589,8 +743,29 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
                 Vec3 into = flattenY(climbCentre_ - selfPos);
                 if (lengthSq(into) < 1e-4f) into = flattenY(climbTarget_ - selfPos);
                 move = normalize(into + Vec3(0.0f, 0.0f, 1e-4f));
-                if (self.onWall())
-                    move = normalize(move + Vec3(0.0f, 1.0f, 0.0f) * 1.15f);
+                // Up, but not forever. A climber holding "forward and up"
+                // against a face does not stop at the roof it chose - it
+                // carries on up whatever taller core the building has, and
+                // then has to get down from there. A stalker that ran out of
+                // wall at fifty metres died of the descent. Past the height
+                // the perch wants, it presses into the face without the lift
+                // and tops out on the first deck the gait can reach.
+                const float up = selfPos.y -
+                                 world.terrain().height(selfPos.x, selfPos.z);
+                if (self.onWall()) {
+                    // Up, but not forever, and back DOWN if the face turned
+                    // out to be taller than the perch wanted. A climber
+                    // holding "forward and up" does not stop at the roof it
+                    // chose - it carries on up whatever taller core the
+                    // building has, and then has to get down from there. On
+                    // the wall, going down is free; walking off the top of it
+                    // is what was killing the machine.
+                    const float lift = (!stalker || up < 30.0f) ? 1.15f
+                                     : (up > 34.0f)             ? -0.9f
+                                                                : 0.0f;
+                    if (std::fabs(lift) > 1e-3f)
+                        move = normalize(move + Vec3(0.0f, 1.0f, 0.0f) * lift);
+                }
                 throttle = 1.0f;
             } else {
                 move = normalize(d);
@@ -599,6 +774,13 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
             break;
         }
         case AiState::Retreat: {
+            if (stalker) {
+                // Hiding behind the wall: stay put unless the enemy can see
+                // in, then shuffle round it.
+                if (visible) { move = normalize(-dirFlat + right * strafeSign_ * 0.8f); throttle = 0.8f; }
+                else { move = Vec3(0.0f); throttle = 0.0f; }
+                break;
+            }
             move = normalize(-dirFlat + right * strafeSign_ * 0.5f);
             throttle = 1.0f;
             break;
@@ -699,7 +881,21 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
 
     in.moveWorld = move;
     in.throttle = throttle * clampf(cfg_.aggression, 0.4f, 1.0f);
-    if (hunting_) in.throttle = 1.0f;
+    if (stalker) in.throttle = throttle;          // its pace is its own
+    if (hunting_ && !stalker) in.throttle = 1.0f;
+
+    // Coming DOWN off a roof is a climb, not a fall. Nothing in here ever
+    // asked for it - the descend flag was written for the player and no
+    // machine had ever set it - so every AI descent was a walk off a
+    // parapet, and the claw-limbed sniper the whole encounter is built
+    // around was killing itself on its own landings. If the machine is up,
+    // it is driving, and there is no deck where it is driving, it goes over
+    // the edge deliberately and climbs down the face.
+    if (in.throttle > 0.25f && lengthSq(in.moveWorld) > 1e-4f) {
+        const float ground = world.terrain().height(selfPos.x, selfPos.z);
+        if (selfPos.y - ground > 6.0f && !footingAlong(normalize(in.moveWorld)))
+            in.wantDescend = true;
+    }
     lastThrottle_ = in.throttle;
 
     // ------------------------------------------------------------ aiming ----
@@ -723,7 +919,7 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
     // half-metre error is no error at all - which is how a nominally poor
     // gunner ends up never missing. Scaling hard with range is what makes
     // distance a real defence and closing the gap a real decision.
-    const float err = (1.0f - cfg_.accuracy) * (1.6f + range * 0.16f);
+    const float err = (1.0f - cfg_.accuracy) * (1.6f + range * cfg_.aimSpread);
     aim += Vec3(rng_.range(-err, err), rng_.range(-err * 0.7f, err * 0.7f),
                 rng_.range(-err, err));
     in.aimPoint = aim;
@@ -732,7 +928,12 @@ MechInput AiController::think(float dt, const World& world, const Mech& self,
     bool wantFire = false;
     if (visible && range < self.stats().sensorRange) {
         const Vec3 aimDir = self.aimDirection();
-        const Vec3 want = normalize(targetPos - self.hitCentre());
+        // Against the solution the gunner BELIEVES in, not against the truth.
+        // Scoring the turret's facing on the true bearing counted the aim
+        // error twice - once in where the turret was pointed and again in
+        // whether it was allowed to shoot - so a gunner with any scatter at
+        // all simply never pulled the trigger at range.
+        const Vec3 want = normalize(aim - self.hitCentre());
         // Fire once the turret is on target, where "on target" is measured
         // against how big the target actually looks from here. A fixed cone is
         // wrong at both ends: far too loose at ten metres and so tight at sixty

@@ -49,6 +49,7 @@ struct MechInput {
     bool ability[4] = {false, false, false, false};
     int toggleMask = 0;                 // bits 0..3: flip that mount on/off this frame
     bool releaseGrip = false;           // deliberately let go of a surface
+    bool wantDescend = false;           // pilot is looking down: drive off a lip = climb down it
 };
 
 struct Leg {
@@ -146,12 +147,19 @@ public:
     // ------------------------------------------------------------ combat ----
     bool alive() const { return health_ > 0.0f; }
     void applyDamage(float amount, const Vec3& fromDirection);
+    // Under a hostile shield pylon this frame (set by the mission).
+    void setShielded(bool s) { shielded_ = s; }
+    bool shielded() const { return shielded_; }
+    // A named machine (bounty elites, set-piece bosses). Empty for the line.
+    void setCallsign(const std::string& c) { callsign_ = c; }
+    const std::string& callsign() const { return callsign_; }
 
     // Multiplies structure, for the campaign's difficulty curve. A tier-0 hull
     // is already a substantial machine, so without this the tutorial enemies
     // are as tough as the player - which is not what "derelict patrol unit"
     // should mean. Call after init; it rescales current health too.
     void scaleHealth(float factor);
+    void scaleArmor(float factor);
     void applyImpulse(const Vec3& v) { vel_ += v; }
     // Checkpoint respawns: bring structure back up to at least this fraction.
     // Field repair from salvage: adds structure, never past the maximum.
@@ -211,6 +219,7 @@ public:
             ? clampf(abilityCooldown_[slot] / stats_.actives[slot].cooldown, 0.0f, 1.0f) : 0.0f;
     }
     bool abilityEngaged(int slot) const { return abilityTimer_[slot] > 0.0f; }
+    float abilityCooldownSeconds(int slot) const { return std::max(0.0f, abilityCooldown_[slot]); }
     bool anyAbilityEngaged() const {
         for (int i = 0; i < 4; ++i) if (abilityTimer_[i] > 0.0f) return true;
         return false;
@@ -384,6 +393,11 @@ private:
     // out of wall.
     bool climbing_ = false;
     float climbGrace_ = 0.0f;
+    bool shielded_ = false;
+    std::string callsign_;
+    bool descending_ = false;      // this climb started at a lip, heading DOWN
+    float climbTime_ = 0.0f;       // seconds the current climb has lasted
+    float climbLipY_ = 0.0f;       // feet height at the lip a descent left from
     float empPulse_ = 0.0f;      // set the frame an EMP surge fires
     float siphonFlash_ = 0.0f;   // decays; drives the repair flash
     // Getting unstuck. wedged_ is "cannot move"; confineTimer_ is the subtler
@@ -395,6 +409,7 @@ private:
     bool enclosed_ = false;        // scan verdict: boxed in, not just idle
     bool pinched_ = false;         // scan verdict: half the compass blocked close
     float stepOver_ = 0.0f;        // 0..1: how hard the hull is being lifted over a lump
+    float kick_ = 0.0f;            // 1 at launch, decaying: the rear legs' push-off
     float footPitch_ = 0.0f;       // hull pitch that follows the feet (cosmetic)
     float stepRaise_ = 0.0f;       // metres of extra ride height asked for by a step-over
     float stepRaiseNow_ = 0.0f;    // smoothed copy the physics uses
@@ -410,6 +425,10 @@ private:
     // down while it lasts, so a specialist steps round and a heavy or
     // ill-suited machine peels off the wall.
     float cornerStress_ = 0.0f;
+    // How long the hull's CENTRE has been inside a solid box. A
+    // moment of it is what going over a parapet looks like; a
+    // second of it means the machine is in the wall.
+    float deepTime_ = 0.0f;
     float slipTimer_ = 0.0f;
     // How far into a top-out the machine is: fraction of planted feet that
     // are gripping the roof rather than the face. Drives the pitch-over and

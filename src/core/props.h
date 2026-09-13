@@ -44,6 +44,7 @@ struct Destructible {
     float hitRadius = 1.4f;
     float hitHeight = 1.6f;     // hit sphere centre sits at half this
     float damageFlash = 0.0f;
+    bool shielded = false;      // under a live shield pylon this frame
     // Seconds since it died. Drives the collapse (a stack topples, a tank
     // splits and slumps, a mast folds, a chimney comes down in the direction
     // of the hit) and the scorched remnant that stays on the field after.
@@ -53,6 +54,7 @@ struct Destructible {
     Vec3 hitCentre() const { return pos + Vec3(0.0f, hitHeight * 0.5f, 0.0f); }
 
     void applyDamage(float amount) {
+        if (shielded && amount < 900.0f) { damageFlash = 0.5f; return; }
         if (!alive) return;
         health -= amount;
         damageFlash = 1.0f;

@@ -6,10 +6,12 @@
 // SDL, OpenGL or windows.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 #include "ascii.h"
 #include "audio.h"
+#include "bindings.h"
 #include "campaign.h"
 #include "cabin.h"
 #include "math3d.h"
@@ -57,6 +59,15 @@ struct InputState {
     // entered the parts list and deployed on the same keystroke, so no part was
     // ever visible for long enough to buy.
     bool menuDeploy = false;
+    // Opens the controls screen (from a menu, or the pause banner).
+    bool openOptions = false;
+    // Rebinding: the raw code that went down this frame, kCodeNone if none.
+    // Only looked at while the controls screen is waiting for a press.
+    int rawKey = -1;
+    int rawPad = -1;
+    // The pad was the last thing the pilot touched, so menus should show
+    // pad buttons in their hints rather than keys.
+    bool padActive = false;
 
     float mouseSensitivity = 0.0032f;
 };
@@ -138,6 +149,36 @@ public:
     void setFrameMs(float ms) { frameMs_ = damp(frameMs_, ms, 6.0f, 0.05f); }
     // The platform pauses by not calling update(); this only tells the HUD.
     void setPaused(bool p) { paused_ = p; }
+
+    // ---- controls ---------------------------------------------------------
+    Bindings& bindings() { return bindings_; }
+    const Bindings& bindings() const { return bindings_; }
+    // Loads acah_controls.txt if present. Platform only.
+    void loadBindings();
+    // The controls screen: an overlay over whatever screen is up. While it is
+    // open update() handles only its navigation and the rest of the game
+    // stands still.
+    bool optionsOpen() const { return optionsOpen_; }
+    void openOptions() { optionsOpen_ = true; optCursor_ = 0; optCapture_ = 0; }
+    // True while the screen is waiting for a key or button to bind: the
+    // platform then feeds raw codes and swallows everything else.
+    bool capturingInput() const { return optionsOpen_ && optCapture_ != 0; }
+    // Escape: cancels a capture, otherwise closes the screen.
+    void optionsEscape();
+    // The platform names codes (it owns SDL); the core only formats them.
+    void setInputNamers(std::function<std::string(int)> key,
+                        std::function<std::string(int)> pad) {
+        keyNamer_ = std::move(key);
+        padNamer_ = std::move(pad);
+    }
+    // The label for an action on whichever device the pilot is using.
+    std::string actionLabel(Action a) const;
+    // The short form, for engraving on a cockpit panel rather than listing
+    // in a table: "LMB" where the options screen says "MOUSE L".
+    std::string actionLabelShort(Action a) const;
+    std::string keyLabel(int code) const;
+    std::string keyLabelShort(int code) const;
+    std::string padLabel(int code) const;
     bool paused() const { return paused_; }
     // Audio health from the platform layer, drawn on the HUD status line so
     // a "sound keeps cutting out" report comes back with numbers attached:
@@ -156,6 +197,10 @@ public:
     bool inCabin() const { return fpv_ && scopeStage_ == 0 && screen_ == GameScreen::Playing; }
 private:
     void applyDisplayToggles(const InputState& in);
+    void updateOptions(const InputState& in);
+    void drawOptions(AsciiFrame& frame);
+    // A menu hint: "[ENTER] FIT" on the keyboard, "[CROSS] FIT" on a pad.
+    std::string hk(const char* key, int padCode) const;
     MechInput buildPlayerInput(const InputState& in) const;
     Vec3 traceAimPoint() const;
     // Sensor fire control: finds the target nearest the aim ray, solves the
@@ -169,7 +214,12 @@ private:
     void drawResult(AsciiFrame& frame);
     void drawStore(AsciiFrame& frame);
     void drawCombatHud(AsciiFrame& frame);
-    void drawCabinReadouts(AsciiFrame& frame);
+    // The brow's two plates - controls and contract - are text on the HUD
+    // grid, inside the projected panels.
+    void drawCabinBrow(AsciiFrame& frame);
+    // The console's legends are lamps on the SCENE grid, placed by
+    // projecting the instrument faces. See the comment on the definition.
+    void drawCabinLamps(AsciiFrame& out);
 
     void emitAudio(float dt, const MechInput& mi);
 
@@ -193,6 +243,7 @@ private:
     Rasterizer raster_;
     Camera cam_;
     RenderSettings render_;
+    RenderSettings baseRender_;   // the arena's lighting before any set-piece darkens it
     AsciiSettings ascii_;
 
     GameScreen screen_ = GameScreen::Briefing;
@@ -207,6 +258,7 @@ private:
     // First person is the DEFAULT view: the pilot sits in the cabin and the
     // instruments are on the console (see cabin.h). X steps outside.
     bool fpv_ = true;
+    bool fpvBeforeScope_ = true;   // the view to return to when the sight comes down
     CabinLayout cabinLayout_;   // rebuilt whenever the loadout changes
     float camDistTarget_ = 12.0f;
     Vec3 camPos_{0.0f, 0.0f, 0.0f};
@@ -265,6 +317,17 @@ private:
     int radarTick_ = 0;
     Rng dustRng_{20260829u};
     std::string status_ = "SYSTEMS NOMINAL";
+
+    // The cabin's body sway this frame, so the HUD pass can project the
+    // instrument panels exactly where the geometry pass drew them.
+    Vec3 cabinSway_{0.0f, 0.0f, 0.0f};
+
+    Bindings bindings_;
+    bool optionsOpen_ = false;
+    int optCursor_ = 0;
+    int optCapture_ = 0;         // 0 idle, 1 waiting for a key, 2 for a pad button
+    bool padActive_ = false;
+    std::function<std::string(int)> keyNamer_, padNamer_;
 };
 
 } // namespace sb

@@ -136,7 +136,8 @@ MechInput pilot(const Mission& m, float t) {
             }
             break;
         }
-        case ObjectiveKind::Convoy: {
+        case ObjectiveKind::Convoy:
+        case ObjectiveKind::KillUnits: {
             float best = 1e9f;
             for (int i : m.markedUnits()) {
                 const Unit& u = m.units()[static_cast<size_t>(i)];
@@ -183,6 +184,7 @@ MechInput pilot(const Mission& m, float t) {
         }
         case ObjectiveKind::ReachZone:
         case ObjectiveKind::Breakthrough:
+        case ObjectiveKind::Outrun:
         case ObjectiveKind::HoldZone:
         default: {
             Vec3 p, vv;

@@ -426,6 +426,65 @@ const std::vector<ArenaDef>& arenaCatalog() {
             a.push_back(d);
         }
 
+        // ------------------------------------------------ 17. TRANSIT DISTRICT
+        // The fully urban map: a mid-rise street grid the whole length of
+        // the route, blocks square to the streets, the lane a real avenue
+        // with cross-streets every block. Every corner is a corner.
+        {
+            ArenaDef d;
+            d.id = "metro";
+            d.name = "TRANSIT DISTRICT";
+            d.subtitle = "STREET GRID";
+            d.terrain.hillAmp = 3.0f; d.terrain.midAmp = 0.8f; d.terrain.fineAmp = 0.3f;
+            d.terrain.flatRadius = 140.0f; d.terrain.flatFalloff = 60.0f;
+            d.terrain.groundColor = Vec3(0.100f, 0.102f, 0.106f);
+            d.terrain.rockColor = Vec3(0.150f, 0.150f, 0.156f);
+            d.render = mood(Vec3(0.55f, 0.50f, 0.42f), Vec3(1.16f, 1.16f, 1.20f),
+                            Vec3(0.024f, 0.028f, 0.036f), Vec3(0.050f, 0.056f, 0.070f),
+                            Vec3(0.007f, 0.010f, 0.015f), 0.0060f,
+                            Vec3(0.14f, 0.15f, 0.19f), Vec3(0.034f, 0.034f, 0.042f));
+            d.layout = DistrictLayout::Metro;
+            d.ruinCount = 40; d.districtRadius = 112.0f;
+            d.floorsMin = 3; d.floorsMax = 8; d.ruinScale = 1.0f; d.ruinDamage = 0.40f;
+            d.concreteTint = Vec3(0.32f, 0.33f, 0.34f);
+            d.barrierCount = 34; d.containerCount = 14; d.rubbleCount = 26; d.mastCount = 6;
+            d.rockDensity = 0.0f;
+            d.verticality = "HIGH";
+            a.push_back(d);
+        }
+
+        // ------------------------------------------------ 18. OLD QUARTER
+        // Low, tight, and everywhere: two-to-four storey blocks packed on a
+        // narrow grid. Nothing tall enough to snipe from, nothing open enough
+        // to see across, and something waiting behind every third wall.
+        {
+            ArenaDef d;
+            d.id = "oldtown";
+            d.name = "OLD QUARTER";
+            d.subtitle = "TENEMENT BLOCKS";
+            d.terrain.hillAmp = 6.0f; d.terrain.midAmp = 1.6f; d.terrain.fineAmp = 0.4f;
+            d.terrain.flatRadius = 120.0f; d.terrain.flatFalloff = 70.0f;
+            d.terrain.groundColor = Vec3(0.120f, 0.112f, 0.100f);
+            d.terrain.rockColor = Vec3(0.170f, 0.160f, 0.150f);
+            d.render = mood(Vec3(0.72f, 0.50f, 0.36f), Vec3(1.22f, 1.18f, 1.10f),
+                            Vec3(0.030f, 0.028f, 0.024f), Vec3(0.060f, 0.055f, 0.048f),
+                            Vec3(0.010f, 0.009f, 0.008f), 0.0072f,
+                            Vec3(0.16f, 0.15f, 0.14f), Vec3(0.040f, 0.037f, 0.034f));
+            d.layout = DistrictLayout::Metro;
+            d.ruinCount = 52; d.districtRadius = 100.0f;
+            d.floorsMin = 1; d.floorsMax = 4; d.ruinScale = 0.85f; d.ruinDamage = 0.55f;
+            d.concreteTint = Vec3(0.36f, 0.33f, 0.30f);
+            d.barrierCount = 26; d.containerCount = 10; d.rubbleCount = 34; d.mastCount = 3;
+            d.rockDensity = 0.0f;
+            d.verticality = "MEDIUM";
+            a.push_back(d);
+        }
+
+        for (ArenaDef& d : a)
+            d.urban = d.id == "ruined_district" || d.id == "downtown" || d.id == "industrial" ||
+                      d.id == "underworks" || d.id == "arcology" || d.id == "refinery" ||
+                      d.id == "metro" || d.id == "oldtown";
+
         // The size pass. Missions are linear routes down the structural axis
         // now, so every arena grows to give the route somewhere to go; the
         // avenue stretch in placeStructures lines the longer lane with city.

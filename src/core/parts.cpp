@@ -720,7 +720,13 @@ PartCatalog::PartCatalog() {
         p.stats.mobility = 6.20f; p.stats.agility = 1.10f; p.stats.jumpPower = 20.0f;
         p.stats.reach = 5.20f; p.stats.stance = 2.30f;
         p.stats.climbGrip = 0.92f; p.stats.climbSpeed = 0.68f;
-        p.stats.ability = Ability::Dash; p.stats.abilityPower = 0.9f;
+        // The dash used to be rated at 0.9 with no cooldown and no duration,
+        // which is a tenth of the weakest dash in the catalogue and re-fires
+        // every frame into a speed cap - so it did nothing at all, on a limb
+        // whose entire pitch is getting off a roof faster than you can be
+        // shot off it.
+        p.stats.ability = Ability::Dash; p.stats.abilityPower = 21.0f;
+        p.stats.abilityCooldown = 5.0f; p.stats.abilityDuration = 0.38f;
         add(p);
     }
     {

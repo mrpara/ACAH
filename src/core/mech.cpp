@@ -1,5 +1,7 @@
 #include "mech.h"
 
+#include "combat.h"
+
 namespace sb {
 
 namespace {
@@ -12,7 +14,11 @@ constexpr float kFallDamageScale = 3.2f;
 // The multiplier is now BAKED IN: the machine always travels at what used
 // to be sprint speed, and Shift does nothing.
 constexpr float kBaseSpeedScale = 1.45f;
-constexpr float kClimbGrace = 0.40f;         // seconds of lost contact before letting go
+// Seconds of lost contact before letting go. Generous on purpose: a
+// window opening, a recessed course of brick or the gap between two
+// boxes of the same building is not the wall ending, and dropping the
+// machine off every one of them is what made climbing feel brittle.
+constexpr float kClimbGrace = 0.52f;
 
 // Six limbs, three a side. The tripods are {front-left, mid-right, back-left}
 // and its mirror, which is the gait every real hexapod uses because three feet
@@ -331,7 +337,26 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
             // A longer reach once committed, so a step away from the face or a
             // bump in the wall does not drop the machine off it.
             const float probeLen = hitRadius_ + (climbing_ ? 3.2f : 1.6f);
-            const SurfaceHit probe = world.raycast(origin, dir, probeLen);
+            SurfaceHit probe = world.raycast(origin, dir, probeLen);
+            // Going DOWN off a lip the hull starts above the roof line, so a
+            // ray from the hull into the face passes clean over the building.
+            // Until the body has dropped below the parapet the face is found
+            // from a stand-height further down.
+            if (descending_ && !(probe.hit && probe.obstacle >= 0)) {
+                const Vec3 worldUpD(0.0f, 1.0f, 0.0f);
+                probe = world.raycast(pos_ - worldUpD * (rideHeight_ + 1.5f), dir, probeLen);
+            }
+            // Last resort, and the one that matters: a ray started INSIDE a
+            // box finds nothing at all, so a hull that has clipped into the
+            // wall it is climbing goes blind - no face, no grip, no
+            // foothold, and the machine reads as hanging in mid-air inside a
+            // building. Asking for the nearest face instead works from
+            // inside as well as out, so the climb survives the moment and
+            // the collision pass pushes the hull back out of the wall.
+            if (!(probe.hit && probe.obstacle >= 0) && world.insideSolid(origin, 0.0f)) {
+                const SurfaceHit near = world.nearestFace(origin, hitRadius_ + 0.8f);
+                if (near.hit && dot(dir, near.normal) < 0.1f) probe = near;
+            }
             if (probe.hit && probe.obstacle >= 0) {
                 const Obstacle& o = world.obstacles()[static_cast<size_t>(probe.obstacle)];
                 const float tilt = std::acos(clampf(probe.normal.y, -1.0f, 1.0f));
@@ -348,7 +373,16 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
                 // (Measuring against the hull made the top of a ten-metre
                 // wall count as low cover the moment the machine climbed
                 // near it, which cancelled the whole top-out.)
-                const float obBase = world.terrain().height(o.center.x, o.center.z);
+                // ...but the ground it stands on is not always the terrain.
+                // A parapet on a twenty-metre roof, a kerb on a causeway
+                // deck, a crate on a gallery: measured from the height field
+                // far below, every one of them reported as a twenty-metre
+                // wall and got no step-up at all, so the machine ground to a
+                // halt against ankle-high clutter it was standing beside.
+                // The floor the machine is ACTUALLY on is the better
+                // baseline whenever it is the higher of the two.
+                const float obBase = std::max(world.terrain().height(o.center.x, o.center.z),
+                                              pos_.y - rideHeight_ - 0.6f);
                 const float obHeight = obTop - obBase;
                 // Climbable or not: a rock is not a wall either, it is a
                 // lump to walk over. (Rocks and trees are flagged
@@ -413,6 +447,49 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
             }
         }
     }
+    // Climbing DOWN. Standing at the lip of a drop with the pilot looking
+    // down and driving over the edge means "descend the face", not "walk off
+    // it and fall". The face below the lip is found by casting back toward
+    // the machine from a point past the edge and below the feet; committing
+    // to it runs the ordinary wall gait, with the drive turned downhill.
+    if (!climbing_ && !onFace && !in.releaseGrip && state_ != MechState::Airborne &&
+        in.wantDescend && in.throttle > 0.25f && crestEase_ <= 0.3f &&
+        lengthSq(in.moveWorld) > 1e-4f) {
+        const Vec3 worldUp(0.0f, 1.0f, 0.0f);
+        Vec3 dir = flattenY(in.moveWorld);
+        if (lengthSq(dir) > 1e-4f) {
+            dir = normalize(dir);
+            const float feetY = pos_.y - rideHeight_;
+            const Vec3 ahead = pos_ + dir * (hitRadius_ + 1.2f);
+            const SurfaceHit floor = world.raycast(ahead, -worldUp, rideHeight_ + 5.0f);
+            const bool drop = !floor.hit || floor.point.y < feetY - 4.5f;
+            if (drop) {
+                const Vec3 origin = ahead - worldUp * (rideHeight_ + 2.5f);
+                const SurfaceHit face = world.raycast(origin, -dir, hitRadius_ + 2.5f);
+                if (face.hit && face.obstacle >= 0) {
+                    const Obstacle& o = world.obstacles()[static_cast<size_t>(face.obstacle)];
+                    const float tilt = std::acos(clampf(face.normal.y, -1.0f, 1.0f));
+                    if (o.climbable && tilt > deg2rad(50.0f) && gripAllowed(face.normal) &&
+                        dot(face.normal, dir) > 0.5f) {
+                        climbNormal_ = face.normal;
+                        climbing_ = true;
+                        descending_ = true;
+                        climbTime_ = 0.0f;
+                        climbLipY_ = feetY;
+                        // The climb "started" at the FOOT of the wall as far as
+                        // the roof rules are concerned: the deck being left is
+                        // then above the base and must not read as a roof to
+                        // mantle back onto, which the descending flag handles.
+                        climbBaseY_ = world.terrain().height(o.center.x, o.center.z) - 1.0f;
+                        onFace = true;
+                        // Ease over the edge rather than run off it.
+                        vel_ = vel_ * 0.4f + dir * 0.8f - worldUp * 1.2f;
+                    }
+                }
+            }
+        }
+    }
+
     // Rounding a corner. When the committed face runs out - the machine has
     // walked to the edge of the wall - look for an adjacent climbable face
     // before giving up on the building. Probing along the direction of travel
@@ -498,7 +575,49 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
     // on the face until the rear legs reached the top, then flipped over all
     // at once. Releasing the wall here and shoving up-and-over is the pull-up.
     mantle_ = 0.0f;
+    climbTime_ = climbing_ ? climbTime_ + dt : 0.0f;
     if (climbing_) {
+        const Vec3 worldUpB(0.0f, 1.0f, 0.0f);
+        const float vyB = dot(vel_, worldUpB);
+        // A descent the pilot turns back into an ascent is an ordinary climb
+        // from here on, and the roof rules below take over.
+        if (descending_ && vyB > 1.5f) descending_ = false;
+        // Bottoming out. A machine climbing DOWN a face - or one that slipped
+        // back to the foot of the wall it was climbing - arrives with its
+        // feet at the pavement and the face probe still happily holding the
+        // wall. Left like that it hangs at the base on its side: from the
+        // cabin that is "the view spun and went black". Level ground under
+        // the hull ends the climb the way a lip ends an ascent.
+        const bool mayBottom = descending_ || (climbTime_ > 1.5f && vyB < 0.2f);
+        if (mayBottom) {
+            const SurfaceHit floor = world.raycast(pos_, -worldUpB, rideHeight_ * 1.15f);
+            // Not the deck the descent is leaving: until the hull is past the
+            // edge that deck is still right under it.
+            const bool leftDeck = !descending_ || floor.point.y < climbLipY_ - 2.5f;
+            if (floor.hit && floor.normal.y > 0.70f && leftDeck) {
+                climbing_ = false;
+                descending_ = false;
+                climbGrace_ = 0.0f;
+                cornerStress_ = 0.0f;
+                supportPoint_ = floor.point;
+                supportNormal_ = floor.normal;
+                desiredUp = floor.normal;
+                if (vyB < -2.0f) vel_ -= worldUpB * (vyB + 2.0f);
+                // Step OFF the face so the hull sphere is not left leaning
+                // on it, and let the wall feet find the ground.
+                vel_ += climbNormal_ * 1.2f;
+                for (Leg& leg : legs_) {
+                    if (leg.planted && dot(leg.footNormal, climbNormal_) > 0.70f) {
+                        leg.planted = false;
+                        leg.stepping = false;
+                    }
+                }
+            }
+        }
+    }
+    if (climbing_ && descending_) {
+        desiredUp = climbNormal_;
+    } else if (climbing_) {
         int wallFeet = 0, roofFeet = 0;
         Vec3 roofN(0.0f);
         float lowWallFoot = 1e9f;
@@ -707,13 +826,54 @@ void Mech::updateOrientation(float dt, const World& world, const MechInput& in) 
         climbGrace_ = 0.0f;
     }
     if (state_ == MechState::Airborne) { climbing_ = false; climbGrace_ = 0.0f; }
+    if (!climbing_) descending_ = false;
 
     // Cresting, the up vector settles FAST: the old rate let the hull hang
     // tilted forty degrees for half a second after topping out, which read
     // as a stumble rather than a mantle.
     const float rate = (state_ == MechState::Airborne) ? 3.0f
                      : (crestEase_ > 0.0f) ? 12.0f : 7.0f;
-    up_ = normalize(lerp(up_, desiredUp, 1.0f - std::exp(-rate * dt)));
+    // On the GROUND the hull never tilts past fifty degrees from level: a
+    // few feet on a scarp face while the rest stand on the flat used to
+    // average into a hull lying on its side, and from the cabin that is
+    // "the view spun". Only a face the machine has COMMITTED to (climbing_)
+    // may take it further.
+    if (!climbing_ && state_ != MechState::Airborne) {
+        const Vec3 worldUp(0.0f, 1.0f, 0.0f);
+        const float cosMax = std::cos(deg2rad(50.0f));
+        if (dot(desiredUp, worldUp) < cosMax) {
+            Vec3 side = desiredUp - worldUp * dot(desiredUp, worldUp);
+            if (lengthSq(side) > 1e-6f) {
+                side = normalize(side);
+                const float sinMax = std::sin(deg2rad(50.0f));
+                desiredUp = normalize(worldUp * cosMax + side * sinMax);
+            } else {
+                desiredUp = worldUp;
+            }
+        }
+    }
+    // Never lerp THROUGH zero. Two nearly opposite up vectors interpolate
+    // to a tiny vector, and normalising that picks a random direction - the
+    // one-frame flip that spun the hull (and the cabin) upside down at
+    // corners and overhangs. Opposite-ish targets rotate about the heading
+    // instead, which is what a body rolling over an edge actually does.
+    {
+        const float k = 1.0f - std::exp(-rate * dt);
+        if (dot(up_, desiredUp) < -0.35f) {
+            // A proper slerp about the axis the two share; only when they
+            // are exactly opposite does the heading stand in for it.
+            Vec3 axis = cross(up_, desiredUp);
+            if (lengthSq(axis) > 1e-4f) axis = normalize(axis);
+            else axis = lengthSq(forward_) > 1e-6f ? normalize(forward_) : Vec3(0.0f, 0.0f, 1.0f);
+            const float ang = std::acos(clampf(dot(up_, desiredUp), -1.0f, 1.0f)) * k;
+            // Rodrigues about the heading.
+            const Vec3 v = up_;
+            up_ = normalize(v * std::cos(ang) + cross(axis, v) * std::sin(ang) +
+                            axis * dot(axis, v) * (1.0f - std::cos(ang)));
+        } else {
+            up_ = normalize(lerp(up_, desiredUp, k));
+        }
+    }
 
     // Keep heading perpendicular to up, and turn it toward where we are going.
     Vec3 wish = in.moveWorld - up_ * dot(in.moveWorld, up_);
@@ -822,6 +982,12 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
             const Vec3 worldUp(0.0f, 1.0f, 0.0f);
             Vec3 uphill = worldUp - up_ * dot(worldUp, up_);
             if (lengthSq(uphill) > 1e-4f) intent += normalize(uphill) * into;
+        } else if (into < 0.0f && descending_) {
+            // Over a lip the pilot is still driving OUT over the drop; on
+            // the face that means down it.
+            const Vec3 worldUp(0.0f, 1.0f, 0.0f);
+            Vec3 uphill = worldUp - up_ * dot(worldUp, up_);
+            if (lengthSq(uphill) > 1e-4f) intent -= normalize(uphill) * (-into);
         }
     }
     Vec3 wish = intent - up_ * dot(intent, up_);
@@ -972,17 +1138,43 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
     // (While the body is being raised over something taller, the raise
     // lifts this line with it, so the lump drops below it as the hull
     // clears - the walk-over and the collision skip arrive together.)
-    const float stepTop = (state_ != MechState::Airborne && !climbing_)
-        ? (pos_.y - rideHeight_ + stats_.standHeight * 0.55f) : -1e9f;
+    const float feetY = pos_.y - rideHeight_;
+    const bool canStep = state_ != MechState::Airborne && !climbing_;
+    const float stepTop = canStep ? (feetY + stats_.standHeight * 0.55f) : -1e9f;
+    // ...and only for things whose top is at or a little below the feet.
+    // Anything further down is a building the machine is standing over, not
+    // a kerb it is stepping onto.
+    const float stepBase = canStep ? (feetY - stats_.standHeight * 0.35f) : -1e9f;
     Vec3 corrected = world.resolveCollision(desired, hitRadius_, &contactNormal,
-                                            &contactKind, stepTop);
+                                            &contactKind, stepTop, stepBase);
 
     // Cap how far collision may move the mech in one frame. Resolving a deep
     // overlap instantly reads as a teleport and drags planted feet past reach.
     {
         Vec3 push = corrected - desired;
         const float pushLen = length(push);
-        const float maxPush = 0.35f;
+        // A graze is smoothed; being INSIDE something is not. A flat cap
+        // meant a hull that had ended up a metre into a wall could only
+        // crawl out at a third of a metre a frame, and every probe the climb
+        // system uses returns nothing from inside a box - so it read as
+        // unsupported, went airborne, dropped the grip, and sank further in.
+        // Sphere-vs-box only ever pushes further than the hull's own radius
+        // when the CENTRE is inside the box, which is not a contact at all -
+        // it is the machine buried in the wall. The only good answer to that
+        // is to be out of it this frame.
+        // Sphere-vs-box only pushes further than the hull's own radius when
+        // the CENTRE is inside the box. A moment of that is normal - it is
+        // what going over a parapet looks like, and flinging the machine
+        // clear would throw it off the building it has nearly climbed - but
+        // a third of a metre a frame is far too slow to get out of a wall
+        // the machine has genuinely ended up inside, and while it is in
+        // there every probe the climb system uses returns nothing, so it
+        // reads as unsupported, drops the grip and sinks further. So: a
+        // graze is smoothed, a brief burial is eased, and a burial that has
+        // lasted long enough to be a mistake is undone at once.
+        const bool deep = pushLen > hitRadius_;
+        deepTime_ = deep ? deepTime_ + dt : 0.0f;
+        const float maxPush = (deep && deepTime_ > 0.5f) ? pushLen : 0.35f;
         if (pushLen > maxPush) corrected = desired + push * (maxPush / pushLen);
         if (pushLen > 1e-5f) {
             const Vec3 n = normalize(push);
@@ -1059,10 +1251,19 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
             const float impact = std::max(0.0f, -dot(vel_, supportNormal_));
             const float fallH = std::max(0.0f, apexY_ - pos_.y);
             const float earnedH = std::max(0.0f, apexY_ - jumpLaunchY_);
-            const float freeH = std::max(7.5f, earnedH * 1.10f + 2.0f);
+            // What a fall costs is a property of the LEGS. A jump-built
+            // machine is a machine built to land: it shrugs off a drop of
+            // fifteen metres and pays little per metre beyond. A siege
+            // platform on stubs that can barely hop is the opposite - half
+            // the free height and twice the price per metre. `spec` is the
+            // jump impulse against a baseline set of legs.
+            const float spec = clampf(stats_.jumpImpulse / 24.0f, 0.25f, 2.4f);
+            const float freeBase = 7.5f * clampf(spec, 0.5f, 2.2f);      // 3.75 .. 16.5 m
+            const float freeH = std::max(freeBase, earnedH * 1.10f + 2.0f);
+            const float perMetre = 4.0f * clampf(1.4f / spec, 0.45f, 2.0f);
             if (fallH > freeH) {
                 const float legFactor = 1.0f / (1.0f + stats_.armor * 0.04f);
-                applyDamage((fallH - freeH) * 4.0f * legFactor, -supportNormal_);
+                applyDamage((fallH - freeH) * perMetre * legFactor, -supportNormal_);
             }
             (void)impact;
             state_ = MechState::Landing;
@@ -1119,7 +1320,16 @@ void Mech::updateLocomotion(float dt, const World& world, const MechInput& in) {
             // Ride at the right height above the support surface, and cancel
             // any velocity into or out of it.
             const float along = dot(pos_ - supportPoint_, up_);
-            const float corr = rideHeight_ + stepRaiseNow_ - along;
+            // On a wall the body's own up is HORIZONTAL and the ride height
+            // is the gap between the hull and the FACE, not the ground. A
+            // machine whose legs are shorter than it is wide would be asked
+            // to ride closer to the wall than its own hull radius - which
+            // means inside it, where every probe the climb system uses
+            // returns nothing and the grip is lost a moment later. The hull
+            // keeps its own skin however short the legs are.
+            float target = rideHeight_ + stepRaiseNow_;
+            if (climbing_) target = std::max(target, hitRadius_ * 0.92f);
+            const float corr = target - along;
             pos_ += up_ * (corr * (1.0f - std::exp(-13.0f * dt)));
             const float vn = dot(vel_, up_);
             vel_ -= up_ * vn;
@@ -1363,9 +1573,18 @@ void Mech::updateJump(float dt, const World& world, const MechInput& in) {
         crouch_ = smoothstep01(jumpCharge_);
         if (!in.jumpHeld) {
             const float commit = lerpf(0.35f, 1.0f, jumpCharge_);
-            const Vec3 tangent = forward_ * clampf(in.throttle, 0.0f, 1.0f);
+            // The leap goes where the STICK points, not where the hull
+            // happens to face, and it goes there hard: a spider's jump is
+            // mostly forward. 0.42 of the impulse used to go sideways and
+            // the machine hopped up more than it went anywhere; it is now
+            // a full impulse forward on top of the vertical one.
+            Vec3 tangent = in.moveWorld - up_ * dot(in.moveWorld, up_);
+            if (lengthSq(tangent) > 1e-4f) tangent = normalize(tangent);
+            else tangent = Vec3(0.0f);
+            tangent = tangent * clampf(in.throttle, 0.0f, 1.0f);
             vel_ += up_ * (stats_.jumpImpulse * commit) +
-                    tangent * (stats_.jumpImpulse * commit * 0.42f);
+                    tangent * (stats_.jumpImpulse * commit * 0.95f);
+            kick_ = 1.0f;
             state_ = MechState::Airborne;
             airTime_ = 0.0f;
             jumpCharge_ = 0.0f;
@@ -1432,13 +1651,33 @@ void Mech::updateGait(float dt, const World& world) {
         airPose_ = damp(airPose_, descentWant, 6.5f, dt);
         const float d = airPose_;
 
-        for (Leg& leg : legs_) {
+        for (size_t li = 0; li < legs_.size(); ++li) {
+            Leg& leg = legs_[li];
+            const bool rear = (li / 2) == 2;
+            const bool front = (li / 2) == 0;
             // TUCK pose: feet drawn up under the hull, per body plan.
-            const float tuck = clampf(0.55f + kneeOut_ * 0.30f, 0.55f, 0.75f);
-            const Vec3 tuckLocal = leg.restLocal *
-                                       lerpf(1.0f, tuck,
-                                             crouch_ > 0.1f ? crouch_ : 0.8f) +
-                                   Vec3(0.0f, rideHeight_ * 0.35f, 0.0f);
+            float tuck = clampf(0.55f + kneeOut_ * 0.30f, 0.55f, 0.75f);
+            Vec3 tuckLocal = leg.restLocal *
+                                 lerpf(1.0f, tuck,
+                                       crouch_ > 0.1f ? crouch_ : 0.8f) +
+                             Vec3(0.0f, rideHeight_ * 0.35f, 0.0f);
+            // The jumping-spider wind-up. Charging, the REAR legs coil: they
+            // fold tighter and pull in under the hull, storing the push; the
+            // front legs stay long and planted-looking, braced ahead. At the
+            // launch the rear pair snaps out and back - the kick - and eases
+            // into the tuck over the first part of the flight.
+            if (state_ == MechState::Crouching && rear) {
+                tuckLocal = leg.restLocal * lerpf(1.0f, 0.42f, jumpCharge_) +
+                            Vec3(0.0f, rideHeight_ * (0.20f + 0.25f * jumpCharge_),
+                                 leg.restLocal.z * 0.35f * jumpCharge_);
+            } else if (state_ == MechState::Crouching && front) {
+                tuckLocal = leg.restLocal * lerpf(1.0f, 0.92f, jumpCharge_) +
+                            Vec3(0.0f, rideHeight_ * 0.12f, -leg.restLocal.z * 0.15f * jumpCharge_);
+            }
+            if (rear && kick_ > 0.01f) {
+                tuckLocal += Vec3(leg.restLocal.x * 0.25f, -rideHeight_ * 0.55f,
+                                  leg.restLocal.z * 0.9f) * kick_;
+            }
             // REACH pose: below stance and splayed outward, feet leading.
             const float splay2 = 0.30f + kneeOut_ * 0.35f;
             const Vec3 reachLocal = leg.restLocal +
@@ -1988,11 +2227,30 @@ void Mech::updateWeapons(float dt, const MechInput& in, std::vector<ShotRequest>
                 const float cosang = dot(want, dir);
                 // Within ~8 degrees; a stronger assist (the outside view)
                 // reaches a little further, to ~11.
-                const float reach = in.assistStrength > 0.6f ? 0.982f : 0.990f;
+                const float reach = in.assistStrength > 0.6f ? 0.986f : 0.990f;
                 if (cosang > reach) {
                     const float w2 = clampf(in.assistStrength, 0.0f, 0.95f);
                     dir = normalize(lerp(dir, want, w2));
                 }
+            }
+        }
+        // Ballistic elevation. Rounds fall, so a gun laid flat at a target
+        // two hundred metres out puts the shell into the ground in front of
+        // it. Who gets the correction for free is a design decision, not a
+        // physics one: an enemy gunnery computer always has it, and the
+        // pilot has exactly as much of it as the fire-control assist is
+        // giving them - which is none at all when free-aiming. That is the
+        // whole reason a slow gun has a shorter useful reach than a fast
+        // one: past a certain distance you have to lay it yourself.
+        {
+            const float comp = (team_ == Team::Player)
+                                   ? clampf(in.assistStrength, 0.0f, 1.0f)
+                                   : 1.0f;
+            if (comp > 0.01f) {
+                const Vec3 target = muzzle + dir * length(in.aimPoint - muzzle);
+                const Vec3 lofted = ballisticAim(muzzle, target, w.projectileSpeed,
+                                                 shotGravity(w));
+                dir = normalize(lerp(dir, lofted, comp));
             }
         }
         // Bracing, a hard lock and a rangefinder all tighten the cone the
@@ -2081,6 +2339,12 @@ void Mech::scaleHealth(float factor) {
     health_ = stats_.maxHealth * frac;
 }
 
+void Mech::scaleArmor(float factor) {
+    // The campaign thins early hostile plate the same way it thins their
+    // hull: a first-act enemy on a tier-2 plate took minutes to kill.
+    stats_.armor *= std::max(0.0f, factor);
+}
+
 void Mech::refillAmmo() {
     for (MountedWeapon& mw : weapons_) {
         if (!mw.part) continue;
@@ -2093,6 +2357,11 @@ void Mech::refillAmmo() {
 
 void Mech::applyDamage(float amount, const Vec3& fromDirection) {
     if (health_ <= 0.0f) return;
+    if (shielded_ && amount < 900.0f) {
+        lastHitDir_ = normalize(fromDirection + Vec3(1e-5f, 0.0f, 0.0f));
+        lastHitAge_ = 0.0f;
+        return;
+    }
     repairPause_ = 0.0f;
     lastHitDir_ = normalize(fromDirection + Vec3(1e-5f, 0.0f, 0.0f));
     lastHitAge_ = 0.0f;
@@ -2231,6 +2500,7 @@ void Mech::update(float dt, const World& world, const MechInput& in,
     // adds a nod and a heave so the machine visibly hauls itself up and over
     // instead of gliding through the lump.
     stepOver_ = std::max(0.0f, stepOver_ - dt * 1.6f);
+    kick_ = std::max(0.0f, kick_ - dt * 3.5f);
     // The step raise is re-asserted every frame the lump is still ahead and
     // bleeds off once it is not, so the body comes back down on the far side
     // at a walk rather than dropping. The smoothed copy is what the ride
@@ -2265,7 +2535,13 @@ void Mech::update(float dt, const World& world, const MechInput& in,
         footPitch_ = damp(footPitch_, want, 6.0f, dt);
     }
     const float stepNod = std::sin(clampf(stepOver_, 0.0f, 1.0f) * PI) * 0.08f;
-    leanM = leanM * Mat4::rotationX(-(footPitch_ * 0.55f + stepNod) * levelness);
+    // Gathering for a jump the hull sits back on its coiled rear legs
+    // (nose up); in the air it noses over as the arc turns down.
+    float jumpPitch = 0.0f;
+    if (state_ == MechState::Crouching) jumpPitch = -0.14f * jumpCharge_;
+    else if (state_ == MechState::Airborne)
+        jumpPitch = clampf(-dot(vel_, Vec3(0.0f, 1.0f, 0.0f)) * 0.012f, -0.12f, 0.16f);
+    leanM = leanM * Mat4::rotationX((-(footPitch_ * 0.55f + stepNod) + jumpPitch) * levelness);
 
     // The pull-up. On a wall the body does not glide, it surges: each tripod's
     // grip hauls the hull a hand-width up the face with a nod into the wall,

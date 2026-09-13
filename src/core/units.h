@@ -40,8 +40,19 @@ enum class UnitKind : int {
     Warden,          // field repair walker: patches the armour around it
                      // faster than you can chew through it. A strongpoint with
                      // one of these does not fall until the Warden does.
+    // ---- wave 15: the third tier -------------------------------------------
+    Gunship,         // rotor gunship: circles at height with an autocannon,
+                     // unreachable by anything but guns that can elevate.
+    Launcher,        // rocket truck: salvoes from behind the line, then MOVES.
+                     // Shoot-and-scoot artillery you have to go and find.
+    ShieldPylon,     // projects a shield over everything near it. Nothing
+                     // inside takes damage until the pylon does.
+    Sapper,          // a mine on legs: rushes the hull and detonates an EMP
+                     // charge against it. Kill it before it arrives.
     Count
 };
+
+constexpr int kUnitKindCount = static_cast<int>(UnitKind::Count);
 
 const char* unitKindName(UnitKind k);
 
@@ -114,6 +125,13 @@ public:
     // above 1 for a target that is hard to hit at all (a low-profile hull).
     void setTargetProfile(float p) { targetProfile_ = clampf(p, 0.5f, 3.0f); }
     bool suppressed() const { return suppressed_ > 0.0f; }
+    // Under a shield pylon's umbrella this frame: damage is turned away. Set
+    // by the mission before the combat pass, every frame.
+    void setShielded(bool s) { shielded_ = s; }
+    bool shielded() const { return shielded_; }
+    // A sapper that has reached its target: the mission fires the charge.
+    bool armedToBlow() const { return blow_; }
+    bool alerted() const { return alerted_; }
 
     // Escorted / friendly variants reuse the same machinery.
     void setTeam(Team t) { team_ = t; }
@@ -182,6 +200,12 @@ private:
     float recoil_ = 0.0f;
     float yawRate_ = 0.0f;
     float accelPitch_ = 0.0f;
+    bool shielded_ = false;
+    bool blow_ = false;
+    float scootTimer_ = 0.0f;    // launcher: seconds left of the move after a salvo
+    float slopePitch_ = 0.0f;   // hull laid onto the ground it crosses (vehicles, walkers)
+    float slopeRoll_ = 0.0f;
+    float grade_ = 0.0f;        // uphill steepness along the travel, 0 flat .. 1 wall
     float prevYaw_ = 0.0f;
     Vec3 prevVel_{0.0f, 0.0f, 0.0f};
     float stride_ = 0.0f;       // walk cycle weight: 0 standing, 1 marching
@@ -230,6 +254,15 @@ struct UnitMeshLibrary {
     Mesh thigh, shin, upperArm, rifle, backpack, pauldron, visor, boot;
     Mesh track, roadWheel, hatch, viewport, mantlet, stowage, smokeTubes, commanderCupola,
          sandbag, rotorGuard, tailBoom, hub, fender;
+    // Wave 15: the vehicles rebuilt at a believable size next to a ten-metre
+    // walker. Two-tier APC hull with a glacis, turret and ramp; a long tank
+    // tub under a wedge turret with a bustle, cheek blocks and a real gun;
+    // the Warden as a hunched four-legged crane rather than a table.
+    Mesh apcLower, apcUpper, apcGlacis, apcTurret, apcGun, apcRamp, headlight, wheelBig,
+         tankTub, tankUpper, tankDeck, grille, tankTurretW, bustle, cheek, tankGun, sprocket,
+         mudguard, wardenBody, wardenCab, wardenHip, wardenShin, craneArm, toolTip, lamp,
+         gunshipBody, gunshipWing, gunshipTail, rocketPod, pylonBase, pylonMast, pylonRing,
+         shieldNode, sapperDome, sapperLeg;
     static const UnitMeshLibrary& instance();
 };
 

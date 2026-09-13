@@ -1,5 +1,7 @@
 #include "units.h"
 
+#include "combat.h"
+
 namespace sb {
 
 namespace {
@@ -29,12 +31,13 @@ WeaponDef rifleDef() {
 
 WeaponDef launcherDef() {
     WeaponDef w;
-    w.damage = 42.0f;
-    w.projectileSpeed = 58.0f;
-    w.fireInterval = 3.2f;
+    // Wave 15: the rocket is the thing that should make you take cover.
+    w.damage = 58.0f;
+    w.projectileSpeed = 62.0f;
+    w.fireInterval = 3.0f;
     w.spread = 0.012f;
-    w.blastRadius = 3.6f;
-    w.blastDamage = 22.0f;
+    w.blastRadius = 4.0f;
+    w.blastDamage = 30.0f;
     w.range = 130.0f;
     w.tracerLength = 1.6f;
     w.tracerRadius = 0.16f;
@@ -57,9 +60,9 @@ WeaponDef cupolaDef() {
 
 WeaponDef tankGunDef() {
     WeaponDef w;
-    w.damage = 56.0f;
+    w.damage = 64.0f;
     w.projectileSpeed = 150.0f;
-    w.fireInterval = 3.3f;
+    w.fireInterval = 3.1f;
     w.spread = 0.004f;
     w.blastRadius = 3.0f;
     w.blastDamage = 20.0f;
@@ -152,6 +155,50 @@ WeaponDef turretGunDef() {
     return w;
 }
 
+WeaponDef gunshipGunDef() {
+    // A 20 mm autocannon on a gimbal: fast, heavy-ish rounds in long
+    // bursts. It hurts because it never has to stop to reload and never
+    // has to find a line of sight from the ground.
+    WeaponDef w;
+    w.damage = 7.5f;
+    w.projectileSpeed = 260.0f;
+    w.fireInterval = 0.11f;
+    w.spread = 0.020f;
+    w.blastRadius = 1.4f;
+    w.blastDamage = 4.0f;
+    w.range = 170.0f;
+    w.tracerLength = 3.0f;
+    w.tracerRadius = 0.07f;
+    w.tracerColor = Vec3(1.0f, 0.75f, 0.35f);
+    return w;
+}
+
+WeaponDef launcherRocketDef() {
+    // Salvo artillery: six rockets in a second and a half, arcing in from
+    // two hundred metres. Each one is a mortar bomb; the salvo is the point.
+    WeaponDef w;
+    w.damage = 18.0f;
+    w.projectileSpeed = 58.0f;
+    w.fireInterval = 0.22f;
+    w.spread = 0.045f;
+    w.blastRadius = 5.5f;
+    w.blastDamage = 24.0f;
+    w.range = 300.0f;
+    w.tracerLength = 2.6f;
+    w.tracerRadius = 0.20f;
+    w.tracerColor = Vec3(1.0f, 0.55f, 0.25f);
+    return w;
+}
+
+WeaponDef unarmedDef() {
+    WeaponDef w;
+    w.damage = 0.0f;
+    w.projectileSpeed = 100.0f;
+    w.fireInterval = 10.0f;
+    w.range = 0.0f;
+    return w;
+}
+
 WeaponDef droneGunDef() {
     WeaponDef w;
     w.damage = 3.0f;
@@ -179,6 +226,10 @@ const char* unitKindName(UnitKind k) {
         case UnitKind::Mortar:    return "MORTAR CREW";
         case UnitKind::Jammer:    return "JAMMER";
         case UnitKind::Warden:    return "WARDEN";
+        case UnitKind::Gunship:   return "GUNSHIP";
+        case UnitKind::Launcher:  return "ROCKET TRUCK";
+        case UnitKind::ShieldPylon: return "SHIELD PYLON";
+        case UnitKind::Sapper:    return "SAPPER";
         default:                  return "?";
     }
 }
@@ -207,7 +258,7 @@ const UnitStats& unitStats(UnitKind k) {
         {
             UnitStats& s = table[static_cast<int>(UnitKind::APC)];
             s.maxHealth = 65.0f; s.speed = 7.5f; s.turnRate = 1.6f;
-            s.radius = 1.6f; s.height = 1.6f;
+            s.radius = 1.9f; s.height = 2.0f;
             s.preferredRange = 45.0f; s.engageRange = 110.0f;
             s.weapon = cupolaDef();
             s.burstLen = 1.2f; s.burstPause = 1.6f;
@@ -216,7 +267,7 @@ const UnitStats& unitStats(UnitKind k) {
         {
             UnitStats& s = table[static_cast<int>(UnitKind::Tank)];
             s.maxHealth = 170.0f; s.speed = 4.6f; s.turnRate = 1.1f;
-            s.radius = 2.1f; s.height = 1.5f;
+            s.radius = 2.5f; s.height = 1.9f;
             s.preferredRange = 90.0f; s.engageRange = 190.0f;
             s.weapon = tankGunDef();
             s.burstLen = 0.1f; s.burstPause = 2.6f;
@@ -259,7 +310,7 @@ const UnitStats& unitStats(UnitKind k) {
         {
             UnitStats& s = table[static_cast<int>(UnitKind::Jammer)];
             s.maxHealth = 78.0f; s.speed = 6.8f; s.turnRate = 1.8f;
-            s.radius = 1.5f; s.height = 1.7f;
+            s.radius = 1.9f; s.height = 2.2f;
             s.preferredRange = 80.0f; s.engageRange = 130.0f;
             s.weapon = jammerDef();
             s.burstLen = 1.0f; s.burstPause = 1.4f;
@@ -275,6 +326,43 @@ const UnitStats& unitStats(UnitKind k) {
             s.burstLen = 1.1f; s.burstPause = 1.5f;
             s.bounty = 230;
             s.supportRadius = 46.0f; s.supportRate = 7.5f;
+        }
+        {
+            UnitStats& s = table[static_cast<int>(UnitKind::Gunship)];
+            s.maxHealth = 95.0f; s.speed = 13.0f; s.turnRate = 3.0f;
+            s.radius = 1.8f; s.height = 1.2f;
+            s.preferredRange = 70.0f; s.engageRange = 160.0f;
+            s.weapon = gunshipGunDef();
+            s.burstLen = 1.3f; s.burstPause = 2.2f;
+            s.bounty = 260; s.hoverHeight = 17.0f;
+        }
+        {
+            UnitStats& s = table[static_cast<int>(UnitKind::Launcher)];
+            s.maxHealth = 72.0f; s.speed = 7.0f; s.turnRate = 1.5f;
+            s.radius = 1.9f; s.height = 2.4f;
+            s.preferredRange = 190.0f; s.engageRange = 280.0f;
+            s.minRange = 60.0f;
+            s.weapon = launcherRocketDef();
+            s.burstLen = 1.4f; s.burstPause = 9.0f;
+            s.bounty = 240;
+        }
+        {
+            UnitStats& s = table[static_cast<int>(UnitKind::ShieldPylon)];
+            s.maxHealth = 140.0f; s.speed = 0.0f; s.radius = 1.4f; s.height = 6.0f;
+            s.preferredRange = 0.0f; s.engageRange = 0.0f;
+            s.weapon = unarmedDef();
+            s.burstLen = 0.0f; s.burstPause = 99.0f;
+            s.bounty = 210;
+            s.supportRadius = 34.0f;
+        }
+        {
+            UnitStats& s = table[static_cast<int>(UnitKind::Sapper)];
+            s.maxHealth = 16.0f; s.speed = 10.5f; s.turnRate = 5.0f;
+            s.radius = 0.7f; s.height = 0.7f;
+            s.preferredRange = 0.0f; s.engageRange = 0.0f;
+            s.weapon = unarmedDef();
+            s.burstLen = 0.0f; s.burstPause = 99.0f;
+            s.bounty = 45; s.crushable = true;
         }
     }
     return table[static_cast<int>(k)];
@@ -303,6 +391,9 @@ void Unit::init(UnitKind kind, const Vec3& pos, float yaw, uint32_t seed) {
 void Unit::applyDamage(float amount) {
     if (!alive_) return;
     alerted_ = true;               // taking fire wakes the whole reflex
+    // Under a shield: the round is turned, the unit still knows. Anything
+    // absurd (a crush, an EMP kill) goes through.
+    if (shielded_ && amount < 900.0f) { damageFlash_ = 0.5f; return; }
     health_ -= amount;
     damageFlash_ = 1.0f;
     if (health_ <= 0.0f) {
@@ -425,6 +516,18 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
         const Vec3 toAnchor = flattenY(anchor_ - pos_);
         if (lengthSq(toAnchor) > 100.0f) wish = normalize(toAnchor) * 0.5f;
         else wish = wander_ * 0.22f;
+    } else if (kind_ == UnitKind::Sapper) {
+        // Straight at the hull, flat out, weaving a little so a gun line
+        // has to track it. The charge goes off when it arrives.
+        const Vec3 fwdTo = flatTo / flatDist;
+        const Vec3 side(fwdTo.z, 0.0f, -fwdTo.x);
+        wish = normalize(fwdTo + side * (std::sin(animPhase_ * 0.9f) * 0.35f));
+        blow_ = flatDist < 4.5f && std::fabs(toTarget.y) < 6.0f;
+    } else if (kind_ == UnitKind::Launcher && scootTimer_ > 0.0f) {
+        // Shoot and scoot: the salvo is away, the truck is leaving.
+        scootTimer_ -= dt;
+        const Vec3 toAnchor = flattenY(anchor_ - pos_);
+        wish = (lengthSq(toAnchor) > 9.0f) ? normalize(toAnchor) : Vec3(0.0f);
     } else if (st.speed > 0.0f) {
         const Vec3 fwdTo = flatTo / flatDist;
         if (flatDist > st.engageRange * 1.6f) {
@@ -446,7 +549,7 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
         if (lengthSq(wish) > 1e-5f) wish = normalize(wish);
     }
 
-    if (kind_ == UnitKind::Drone) {
+    if (kind_ == UnitKind::Drone || kind_ == UnitKind::Gunship) {
         // Hover: chase a point above the target band, bobbing.
         const Vec3 desired = pos_ + wish * st.speed;
         const float groundY = world.terrain().height(pos_.x, pos_.z);
@@ -458,8 +561,10 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
         pos_ += vel_ * dt;
         pos_ = world.resolveCollision(pos_, st.radius);
     } else if (st.speed > 0.0f) {
-        vel_.x = damp(vel_.x, wish.x * st.speed, 6.0f, dt);
-        vel_.z = damp(vel_.z, wish.z * st.speed, 6.0f, dt);
+        // A bank is climbed at a crawl, not at road speed.
+        const float gradeSlow = 1.0f / (1.0f + grade_ * 2.2f);
+        vel_.x = damp(vel_.x, wish.x * st.speed * gradeSlow, 6.0f, dt);
+        vel_.z = damp(vel_.z, wish.z * st.speed * gradeSlow, 6.0f, dt);
         pos_.x += vel_.x * dt;
         pos_.z += vel_.z * dt;
         pos_ = world.resolveCollision(pos_, st.radius);
@@ -471,7 +576,54 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
         const SurfaceHit h = world.findFoothold(pos_ + Vec3(0.0f, 1.0f, 0.0f),
                                                 Vec3(0.0f, 1.0f, 0.0f), 2.6f, 4.0f);
         const float floorY = (h.hit && h.point.y > g) ? h.point.y : g;
-        pos_.y = damp(pos_.y, floorY, 14.0f, dt);
+        // The hull CLIMBS the ground rather than snapping to it. A damp at
+        // fourteen a second put a tank on top of a four-metre bank in a
+        // tenth of a second - from the player's seat the thing warped from
+        // the bottom of the slope to the top. Rising is rate-limited to what
+        // the tracks could do (a grade at travel speed, never more than a
+        // few metres a second); dropping is faster, it is gravity.
+        {
+            const float dy = floorY - pos_.y;
+            const float upRate = std::max(1.2f, st.speed * 0.75f);
+            const float step = (dy > 0.0f) ? std::min(dy, upRate * dt)
+                                           : std::max(dy, -9.0f * dt);
+            pos_.y += (std::fabs(dy) < 0.02f) ? dy : step;
+        }
+    }
+    // Lie on the ground: pitch and roll follow the terrain under the
+    // footprint, so a vehicle on a bank is ANGLED on it. Sampled fore-aft
+    // and side-side a body length apart, smoothed like suspension. Standing
+    // on a deck (floor above the terrain) the hull is level. Infantry stay
+    // upright - people do.
+    {
+        const bool lies = kind_ == UnitKind::APC || kind_ == UnitKind::Tank ||
+                          kind_ == UnitKind::Jammer || kind_ == UnitKind::Warden ||
+                          kind_ == UnitKind::Turret || kind_ == UnitKind::Launcher ||
+                          kind_ == UnitKind::Sapper;
+        float wantP = 0.0f, wantR = 0.0f, wantG = 0.0f;
+        if (lies) {
+            const float L = std::max(st.radius * 1.2f, 1.6f);
+            const Vec3 f(std::sin(yaw_), 0.0f, std::cos(yaw_));
+            const Vec3 r(std::cos(yaw_), 0.0f, -std::sin(yaw_));
+            const float g0 = world.terrain().height(pos_.x, pos_.z);
+            if (pos_.y < g0 + 0.6f) {
+                const float hF = world.terrain().height(pos_.x + f.x * L, pos_.z + f.z * L);
+                const float hB = world.terrain().height(pos_.x - f.x * L, pos_.z - f.z * L);
+                const float hR = world.terrain().height(pos_.x + r.x * L, pos_.z + r.z * L);
+                const float hL = world.terrain().height(pos_.x - r.x * L, pos_.z - r.z * L);
+                wantP = clampf(-std::atan2(hF - hB, 2.0f * L), -0.55f, 0.55f);
+                wantR = clampf(std::atan2(hR - hL, 2.0f * L), -0.45f, 0.45f);
+                const Vec3 travel = flattenY(vel_);
+                if (lengthSq(travel) > 0.2f) {
+                    const Vec3 t = normalize(travel);
+                    const float hA = world.terrain().height(pos_.x + t.x * L, pos_.z + t.z * L);
+                    wantG = clampf((hA - g0) / L, 0.0f, 1.5f);
+                }
+            }
+        }
+        slopePitch_ = damp(slopePitch_, wantP, 6.0f, dt);
+        slopeRoll_ = damp(slopeRoll_, wantR, 6.0f, dt);
+        grade_ = damp(grade_, wantG, 4.0f, dt);
     }
 
     // Hull yaw follows travel for vehicles, the enemy for infantry.
@@ -537,7 +689,7 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
     // range, at both ends: inside the minimum the tube cannot be depressed and
     // the crew are four men with sidearms.
     const bool indirect = st.minRange > 0.0f;
-    if (dist > st.engageRange || (indirect && dist < st.minRange)) {
+    if (st.weapon.damage <= 0.0f || dist > st.engageRange || (indirect && dist < st.minRange)) {
         burstTimer_ = 0.0f;
         return;
     }
@@ -547,7 +699,19 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
     }
     if (burstTimer_ > 0.0f) {
         burstTimer_ -= dt;
-        if (burstTimer_ <= 0.0f) pauseTimer_ = st.burstPause * (0.7f + frand() * 0.6f);
+        if (burstTimer_ <= 0.0f) {
+            pauseTimer_ = st.burstPause * (0.7f + frand() * 0.6f);
+            if (kind_ == UnitKind::Launcher) {
+                // The salvo gave the position away: move forty metres
+                // sideways before the next one. Counter-battery has to
+                // chase it.
+                const Vec3 fwdTo = flatTo / flatDist;
+                const Vec3 side(fwdTo.z, 0.0f, -fwdTo.x);
+                anchor_ = pos_ + side * ((frand() < 0.5f ? -1.0f : 1.0f) * 40.0f) -
+                          fwdTo * 8.0f;
+                scootTimer_ = 6.5f;
+            }
+        }
     } else {
         pauseTimer_ -= dt;
         if (pauseTimer_ <= 0.0f) burstTimer_ = st.burstLen;
@@ -572,6 +736,11 @@ void Unit::update(float dt, const World& world, const Vec3& targetPos,
     }
     Vec3 dir = aim - muzzle;
     if (lengthSq(dir) < 1e-4f) return;
+    // Rounds fall. An emplacement lays its gun for the range, the way a
+    // gunner would; without that every turret past a hundred metres would
+    // be shooting into the dirt short of the target.
+    dir = ballisticAim(muzzle, aim, st.weapon.projectileSpeed,
+                       shotGravity(st.weapon));
     if (indirect) {
         // Lofted, so the round arcs over whatever is between the tube and the
         // target instead of drilling through it, and so the player can see it
@@ -685,6 +854,43 @@ const UnitMeshLibrary& UnitMeshLibrary::instance() {
         l.rotorGuard = makeCylinder(0.46f, 0.46f, 0.04f, 12, false, false, kArmorDark);
         l.tailBoom = makeBox(Vec3(0.06f, 0.05f, 0.45f), kArmorDark);
         l.fender = makeBox(Vec3(0.12f, 0.05f, 0.42f), kArmorGrey);
+        // Wave 15 vehicles.
+        l.apcLower = makeSlopedBox(Vec3(1.05f, 0.0f, 2.25f), Vec3(1.25f, 0.0f, 2.35f), 0.62f, kArmorGrey);
+        l.apcUpper = makeSlopedBox(Vec3(1.25f, 0.0f, 1.75f), Vec3(1.02f, 0.0f, 1.45f), 0.78f, kArmorGrey);
+        l.apcGlacis = makeSlopedBox(Vec3(1.2f, 0.0f, 0.62f), Vec3(1.0f, 0.0f, 0.10f), 0.74f, kArmorGrey);
+        l.apcTurret = makeSlopedBox(Vec3(0.62f, 0.0f, 0.66f), Vec3(0.48f, 0.0f, 0.5f), 0.42f, kArmorGrey);
+        l.apcGun = makeCylinder(0.07f, 0.055f, 1.25f, 6, true, true, kArmorDark);
+        l.apcRamp = makeChamferBox(Vec3(0.95f, 0.55f, 0.06f), 0.04f, kArmorDark);
+        l.headlight = makeBox(Vec3(0.11f, 0.06f, 0.03f), Vec3(0.9f, 0.85f, 0.6f));
+        l.wheelBig = makeCylinder(0.46f, 0.46f, 0.34f, 10, true, true, kArmorDark);
+        l.tankTub = makeBox(Vec3(1.35f, 0.34f, 2.85f), kArmorDark);
+        l.tankUpper = makeSlopedBox(Vec3(1.62f, 0.0f, 2.95f), Vec3(1.45f, 0.0f, 2.15f), 0.58f, kArmorGrey);
+        l.tankDeck = makeChamferBox(Vec3(1.30f, 0.10f, 0.95f), 0.05f, kArmorGrey);
+        l.grille = makeBox(Vec3(1.05f, 0.03f, 0.10f), kArmorDark);
+        l.tankTurretW = makeSlopedBox(Vec3(1.35f, 0.0f, 1.30f), Vec3(1.0f, 0.0f, 0.95f), 0.66f, kArmorGrey);
+        l.bustle = makeChamferBox(Vec3(1.05f, 0.26f, 0.42f), 0.06f, kArmorDark);
+        l.cheek = makeChamferBox(Vec3(0.34f, 0.22f, 0.30f), 0.05f, kArmorDark);
+        l.tankGun = makeCylinder(0.135f, 0.10f, 4.1f, 8, true, true, kArmorDark);
+        l.sprocket = makeCylinder(0.33f, 0.33f, 0.24f, 8, true, true, kArmorDark);
+        l.mudguard = makeBox(Vec3(0.40f, 0.04f, 0.55f), kArmorGrey);
+        l.wardenBody = makeChamferBox(Vec3(0.85f, 0.42f, 1.15f), 0.14f, kArmorGrey);
+        l.wardenCab = makeChamferBox(Vec3(0.55f, 0.36f, 0.42f), 0.10f, kArmorDark);
+        l.wardenHip = makeChamferBox(Vec3(0.14f, 0.55f, 0.14f), 0.04f, kArmorGrey);
+        l.wardenShin = makeChamferBox(Vec3(0.10f, 0.62f, 0.10f), 0.03f, kArmorDark);
+        l.craneArm = makeBox(Vec3(0.09f, 0.09f, 1.35f), kArmorDark);
+        l.toolTip = makeCylinder(0.10f, 0.03f, 0.32f, 6, true, true, kArmorDark);
+        l.lamp = makeBox(Vec3(0.08f, 0.08f, 0.04f), Vec3(1.0f, 0.75f, 0.35f));
+        // The third tier.
+        l.gunshipBody = makeSlopedBox(Vec3(0.9f, 0.0f, 2.6f), Vec3(0.7f, 0.0f, 2.0f), 1.1f, kArmorGrey);
+        l.gunshipWing = makeBox(Vec3(2.4f, 0.08f, 0.5f), kArmorDark);
+        l.gunshipTail = makeBox(Vec3(0.18f, 0.16f, 1.25f), kArmorDark);
+        l.rocketPod = makeChamferBox(Vec3(0.9f, 0.55f, 1.5f), 0.08f, kArmorDark);
+        l.pylonBase = makeCylinder(1.5f, 1.2f, 1.0f, 8, true, true, kArmorDark);
+        l.pylonMast = makeCylinder(0.35f, 0.22f, 5.0f, 6, true, true, kArmorGrey);
+        l.pylonRing = makeCylinder(1.3f, 1.3f, 0.25f, 12, false, false, kLens);
+        l.shieldNode = makeSphere(0.45f, 4, 6, kLens);
+        l.sapperDome = makeSphere(0.65f, 5, 8, kArmorDark);
+        l.sapperLeg = makeBox(Vec3(0.06f, 0.06f, 0.45f), kArmorGrey);
         return l;
     }();
     return lib;
@@ -809,26 +1015,30 @@ void Unit::submit(Rasterizer& raster, const Vec3& viewPos) const {
             return;
         }
         const Mat4 wreck = Mat4::translation(pos_) * Mat4::rotationY(yaw_) *
-                           Mat4::rotationX(wreckPitch_) * Mat4::rotationZ(wreckRoll_);
+                           Mat4::rotationX(wreckPitch_ + slopePitch_) *
+                           Mat4::rotationZ(wreckRoll_ + slopeRoll_);
         switch (kind_) {
             case UnitKind::APC:
             case UnitKind::Jammer:
-                drawW(lib.apcHull, wreck * Mat4::translation(Vec3(0.0f, 0.42f, 0.0f)));
-                drawW(lib.cupola, wreck * Mat4::translation(Vec3(0.35f, 1.05f, -0.4f)) *
-                                      Mat4::rotationZ(0.5f));
+                drawW(lib.apcLower, wreck * Mat4::translation(Vec3(0.0f, 0.30f, 0.0f)));
+                drawW(lib.apcUpper, wreck * Mat4::translation(Vec3(0.1f, 0.85f, -0.35f)) * Mat4::rotationZ(0.12f));
+                drawW(lib.apcTurret, wreck * Mat4::translation(Vec3(0.6f, 1.30f, -0.4f)) *
+                                         Mat4::rotationZ(0.6f) * Mat4::rotationY(1.1f));
                 for (int sx = -1; sx <= 1; sx += 2)
-                    for (int i = 0; i < 3; ++i)
-                        drawW(lib.wheel, wreck * Mat4::translation(Vec3(sx * 1.05f, 0.30f, -0.95f + i * 0.95f)) *
-                                             Mat4::rotationZ(PI * 0.5f));
+                    for (int i = 0; i < 4; ++i)
+                        drawW(lib.wheelBig, wreck * Mat4::translation(Vec3(sx * 1.15f, 0.36f, -1.65f + i * 1.1f)) *
+                                                Mat4::rotationZ(PI * 0.5f + ((i + sx) & 1) * 0.3f));
                 break;
             case UnitKind::Tank:
-                drawW(lib.tankHull, wreck * Mat4::translation(Vec3(0.0f, 0.5f, 0.0f)));
+                drawW(lib.tankTub, wreck * Mat4::translation(Vec3(0.0f, 0.50f, 0.0f)));
+                drawW(lib.tankUpper, wreck * Mat4::translation(Vec3(0.0f, 0.80f, 0.0f)));
                 for (int sx = -1; sx <= 1; sx += 2)
-                    drawW(lib.track, wreck * Mat4::translation(Vec3(sx * 1.45f, 0.36f, 0.0f)));
-                drawW(lib.tankTurret, wreck * Mat4::translation(Vec3(0.3f, 1.15f, -0.3f)) *
-                                          Mat4::rotationZ(0.35f) * Mat4::rotationY(0.8f));
-                drawW(lib.tankBarrel, wreck * Mat4::translation(Vec3(0.3f, 1.3f, 0.4f)) *
-                                          Mat4::rotationX(PI * 0.30f));
+                    drawW(lib.track, wreck * Mat4::translation(Vec3(sx * 1.55f, 0.36f, -0.25f)) *
+                                         Mat4::scaling(Vec3(1.0f, 1.0f, 1.55f)));
+                drawW(lib.tankTurretW, wreck * Mat4::translation(Vec3(0.4f, 1.25f, -0.3f)) *
+                                           Mat4::rotationZ(0.45f) * Mat4::rotationY(0.8f));
+                drawW(lib.tankGun, wreck * Mat4::translation(Vec3(0.4f, 1.5f, 0.4f)) *
+                                       Mat4::rotationX(PI * 0.30f));
                 break;
             case UnitKind::Turret:
                 drawW(lib.turretBase, wreck);
@@ -840,15 +1050,37 @@ void Unit::submit(Rasterizer& raster, const Vec3& viewPos) const {
                                          Mat4::rotationZ(0.9f));
                 break;
             case UnitKind::Warden:
-                drawW(lib.apcHull, wreck * Mat4::translation(Vec3(0.0f, 0.8f, 0.0f)) * Mat4::rotationZ(0.4f));
+                drawW(lib.wardenBody, wreck * Mat4::translation(Vec3(0.0f, 0.75f, 0.0f)) * Mat4::rotationZ(0.4f));
+                drawW(lib.craneArm, wreck * Mat4::translation(Vec3(0.3f, 0.9f, -1.6f)) * Mat4::rotationX(-0.3f));
                 for (int sx = -1; sx <= 1; sx += 2)
                     for (int sz = -1; sz <= 1; sz += 2)
-                        drawW(lib.walkLeg, wreck * Mat4::translation(Vec3(sx * 0.95f, 0.5f, sz * 0.75f)) *
-                                               Mat4::rotationZ(sx * 0.9f) * Mat4::rotationX(sz * 0.4f));
+                        drawW(lib.wardenHip, wreck * Mat4::translation(Vec3(sx * 1.1f, 0.4f, sz * 0.95f)) *
+                                                 Mat4::rotationZ(sx * 1.2f) * Mat4::rotationX(sz * 0.4f));
                 break;
             case UnitKind::Mortar:
                 drawW(lib.baseplate, wreck * Mat4::translation(Vec3(0.0f, 0.06f, 0.0f)));
                 drawW(lib.mortarTube, wreck * Mat4::translation(Vec3(0.3f, 0.2f, 0.0f)) * Mat4::rotationZ(1.3f));
+                break;
+            case UnitKind::Gunship:
+                drawW(lib.gunshipBody, wreck * Mat4::translation(Vec3(0.0f, 0.3f, 0.0f)) * Mat4::rotationZ(0.7f));
+                drawW(lib.gunshipWing, wreck * Mat4::translation(Vec3(0.4f, 0.9f, 0.2f)) * Mat4::rotationZ(0.9f));
+                drawW(lib.gunshipTail, wreck * Mat4::translation(Vec3(1.5f, 0.3f, -3.0f)) * Mat4::rotationY(0.6f));
+                break;
+            case UnitKind::Launcher:
+                drawW(lib.apcLower, wreck * Mat4::translation(Vec3(0.0f, 0.30f, 0.0f)));
+                drawW(lib.rocketPod, wreck * Mat4::translation(Vec3(0.5f, 1.2f, -0.8f)) *
+                                         Mat4::rotationZ(0.8f) * Mat4::rotationX(0.5f));
+                for (int sx = -1; sx <= 1; sx += 2)
+                    for (int i = 0; i < 4; ++i)
+                        drawW(lib.wheelBig, wreck * Mat4::translation(Vec3(sx * 1.15f, 0.36f, -1.65f + i * 1.1f)) *
+                                                Mat4::rotationZ(PI * 0.5f));
+                break;
+            case UnitKind::ShieldPylon:
+                drawW(lib.pylonBase, wreck);
+                drawW(lib.pylonMast, wreck * Mat4::translation(Vec3(0.6f, 0.9f, 0.0f)) * Mat4::rotationZ(1.25f));
+                break;
+            case UnitKind::Sapper:
+                drawW(lib.sapperDome, wreck * Mat4::translation(Vec3(0.0f, 0.2f, 0.0f)) * Mat4::scaling(Vec3(0.8f, 0.4f, 0.8f)));
                 break;
             default: break;
         }
@@ -871,8 +1103,12 @@ void Unit::submit(Rasterizer& raster, const Vec3& viewPos) const {
     // under acceleration, and squats a touch at speed.
     const float roll = clampf(-yawRate_ * 0.10f, -0.09f, 0.09f);
     const Mat4 hull = Mat4::translation(pos_) * Mat4::rotationY(yaw_) *
-                      Mat4::rotationX(accelPitch_) * Mat4::rotationZ(roll);
-    const Mat4 gun = Mat4::translation(pos_) * Mat4::rotationY(gunYaw_);
+                      Mat4::rotationX(accelPitch_ + slopePitch_) *
+                      Mat4::rotationZ(roll + slopeRoll_);
+    // The gun sits on the tilted deck, so it turns in the hull's plane.
+    const Mat4 gun = Mat4::translation(pos_) * Mat4::rotationY(yaw_) *
+                     Mat4::rotationX(slopePitch_) * Mat4::rotationZ(slopeRoll_) *
+                     Mat4::rotationY(gunYaw_ - yaw_);
     const float speedNow = length(flattenY(vel_));
 
     switch (kind_) {
@@ -886,73 +1122,110 @@ void Unit::submit(Rasterizer& raster, const Vec3& viewPos) const {
             break;
         }
         case UnitKind::APC: {
-            draw(lib.apcHull, hull * Mat4::translation(Vec3(0.0f, 0.55f, 0.0f)), white);
+            // An eight-wheeled carrier: a low tub, a sloped superstructure
+            // set back on it, a glacis running up to the driver's slit, a
+            // small turret with a long autocannon, and a ramp at the back.
+            draw(lib.apcLower, hull * Mat4::translation(Vec3(0.0f, 0.42f, 0.0f)), white);
+            draw(lib.apcUpper, hull * Mat4::translation(Vec3(0.0f, 1.02f, -0.35f)), white);
+            draw(lib.apcGlacis, hull * Mat4::translation(Vec3(0.0f, 1.02f, 1.55f)), white);
             {
                 const float spin = animPhase_;
                 for (int sx = -1; sx <= 1; sx += 2)
-                    for (int i = 0; i < 3; ++i) {
-                        const float z = -0.95f + i * 0.95f;
-                        const Mat4 w = hull * Mat4::translation(Vec3(sx * 1.05f, 0.34f, z)) *
+                    for (int i = 0; i < 4; ++i) {
+                        const float z = -1.65f + i * 1.1f;
+                        const Mat4 w = hull * Mat4::translation(Vec3(sx * 1.15f, 0.46f, z)) *
                                        Mat4::rotationZ(PI * 0.5f) * Mat4::rotationY(spin);
-                        draw(lib.wheel, w, white);
-                        if (near) draw(lib.hub, w * Mat4::translation(Vec3(0.0f, sx > 0 ? -0.05f : 0.05f, 0.0f)),
+                        draw(lib.wheelBig, w, white);
+                        if (near) draw(lib.hub, w * Mat4::translation(Vec3(0.0f, sx > 0 ? -0.10f : 0.10f, 0.0f)),
                                        Vec3(1.15f, 1.15f, 1.15f));
-                        if (near) draw(lib.fender, hull * Mat4::translation(Vec3(sx * 1.10f, 0.78f, z)), white);
+                        if (near) draw(lib.mudguard, hull * Mat4::translation(Vec3(sx * 1.25f, 0.98f, z)), white);
                     }
             }
-            draw(lib.cupola, gun * Mat4::translation(Vec3(0.0f, 1.35f, 0.0f)), kAccent);
-            draw(lib.gunpod, gun * Mat4::translation(Vec3(0.0f, 1.40f, 0.35f)) *
+            draw(lib.apcTurret, gun * Mat4::translation(Vec3(0.0f, 1.80f, -0.15f)), kAccent);
+            draw(lib.apcGun, gun * Mat4::translation(Vec3(0.18f, 2.02f, 0.35f)) *
                                  Mat4::rotationX(PI * 0.5f - gunPitch_) *
-                                 Mat4::translation(Vec3(0.0f, -recoil_ * 0.08f, 0.0f)), kArmorDark);
+                                 Mat4::translation(Vec3(0.0f, -recoil_ * 0.10f, 0.0f)), kArmorDark);
             if (near) {
-                draw(lib.bullbar, hull * Mat4::translation(Vec3(0.0f, 0.55f, 1.15f)), white);
-                draw(lib.viewport, hull * Mat4::translation(Vec3(0.0f, 0.95f, 1.06f)), white, 0.3f);
-                draw(lib.hatch, hull * Mat4::translation(Vec3(-0.55f, 1.32f, -0.75f)), white);
-                draw(lib.antenna, hull * Mat4::translation(Vec3(-0.85f, 1.35f, -0.7f)) *
+                draw(lib.hatch, gun * Mat4::translation(Vec3(-0.30f, 2.22f, -0.35f)), white);
+                draw(lib.apcRamp, hull * Mat4::translation(Vec3(0.0f, 1.05f, -2.32f)), white);
+                draw(lib.bullbar, hull * Mat4::translation(Vec3(0.0f, 0.62f, 2.42f)), white);
+                draw(lib.viewport, hull * Mat4::translation(Vec3(0.35f, 1.55f, 1.86f)) *
+                                       Mat4::rotationX(0.55f), white, 0.3f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(-0.85f, 0.95f, 2.34f)), white, 0.85f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(0.85f, 0.95f, 2.34f)), white, 0.85f);
+                draw(lib.antenna, hull * Mat4::translation(Vec3(-0.95f, 1.80f, -1.4f)) *
                                       Mat4::rotationZ(-0.12f + std::sin(animPhase_ * 0.5f) * 0.04f),
                      white);
-                draw(lib.stowage, hull * Mat4::translation(Vec3(0.0f, 1.38f, -0.85f)) *
-                                      Mat4::rotationY(PI * 0.5f), white);
+                draw(lib.stowage, hull * Mat4::translation(Vec3(-1.08f, 1.45f, -0.6f)), white);
+                draw(lib.stowage, hull * Mat4::translation(Vec3(1.08f, 1.45f, -0.6f)), white);
+                draw(lib.smokeTubes, hull * Mat4::translation(Vec3(-0.9f, 1.80f, 0.9f)) *
+                                         Mat4::rotationY(0.4f), white);
+                draw(lib.smokeTubes, hull * Mat4::translation(Vec3(0.9f, 1.80f, 0.9f)) *
+                                         Mat4::rotationY(-0.4f), white);
+                for (int sx = -1; sx <= 1; sx += 2)
+                    draw(lib.exhaust, hull * Mat4::translation(Vec3(sx * 1.15f, 1.20f, -1.9f)) *
+                                          Mat4::rotationX(-1.2f), white);
             }
             break;
         }
         case UnitKind::Tank: {
-            draw(lib.tankHull, hull * Mat4::translation(Vec3(0.0f, 0.65f, 0.0f)), white);
-            // Tracks: a run each side with road wheels rolling inside it.
+            // A main battle tank with the proportions of one: a long tub
+            // between two full-length tracks, a sloped upper hull with an
+            // engine deck and grilles, and a wedge turret carrying a gun as
+            // long as the hull, a bustle rack, cheek blocks and a cupola.
+            draw(lib.tankTub, hull * Mat4::translation(Vec3(0.0f, 0.62f, 0.0f)), white);
+            draw(lib.tankUpper, hull * Mat4::translation(Vec3(0.0f, 0.92f, 0.0f)), white);
+            draw(lib.tankDeck, hull * Mat4::translation(Vec3(0.0f, 1.52f, -1.55f)), white);
             for (int sx = -1; sx <= 1; sx += 2) {
-                draw(lib.track, hull * Mat4::translation(Vec3(sx * 1.45f, 0.38f, 0.0f)), white);
+                draw(lib.track, hull * Mat4::translation(Vec3(sx * 1.55f, 0.42f, -0.25f)) *
+                                    Mat4::scaling(Vec3(1.0f, 1.0f, 1.55f)), white);
                 if (near) {
                     const float spin = animPhase_;
-                    for (int i = 0; i < 5; ++i) {
-                        const float z = -1.5f + i * 0.75f;
+                    for (int i = 0; i < 7; ++i) {
+                        const float z = -2.35f + i * 0.72f;
                         draw(lib.roadWheel,
-                             hull * Mat4::translation(Vec3(sx * 1.52f, 0.30f, z)) *
+                             hull * Mat4::translation(Vec3(sx * 1.66f, 0.34f, z)) *
                                  Mat4::rotationZ(PI * 0.5f) * Mat4::rotationY(spin + i),
                              Vec3(0.75f, 0.75f, 0.75f));
                     }
-                    draw(lib.skirt, hull * Mat4::translation(Vec3(sx * 1.55f, 0.78f, 0.0f)) *
-                                        Mat4::rotationY(PI * 0.5f), white);
+                    draw(lib.sprocket, hull * Mat4::translation(Vec3(sx * 1.66f, 0.55f, 2.75f)) *
+                                           Mat4::rotationZ(PI * 0.5f) * Mat4::rotationY(spin), white);
+                    draw(lib.sprocket, hull * Mat4::translation(Vec3(sx * 1.66f, 0.50f, -2.95f)) *
+                                           Mat4::rotationZ(PI * 0.5f) * Mat4::rotationY(spin), white);
+                    draw(lib.skirt, hull * Mat4::translation(Vec3(sx * 1.70f, 0.98f, -0.1f)) *
+                                        Mat4::rotationY(PI * 0.5f) * Mat4::scaling(Vec3(1.7f, 1.0f, 1.0f)), white);
+                    for (int g = 0; g < 3; ++g)
+                        draw(lib.grille, hull * Mat4::translation(Vec3(0.0f, 1.64f, -1.15f - g * 0.42f)), white);
                 }
             }
             // Turret with mantlet; the barrel recoils into it on a shot.
-            const Mat4 tur = gun * Mat4::translation(Vec3(0.0f, 1.45f, -0.1f));
-            draw(lib.tankTurret, tur, white);
-            const Mat4 tube = tur * Mat4::translation(Vec3(0.0f, 0.05f, 0.7f)) *
+            const Mat4 tur = gun * Mat4::translation(Vec3(0.0f, 1.50f, 0.05f));
+            draw(lib.tankTurretW, tur, white);
+            draw(lib.bustle, tur * Mat4::translation(Vec3(0.0f, 0.30f, -1.45f)), white);
+            const Mat4 tube = tur * Mat4::translation(Vec3(0.0f, 0.36f, 0.95f)) *
                               Mat4::rotationX(PI * 0.5f - gunPitch_);
-            draw(lib.mantlet, tube * Mat4::translation(Vec3(0.0f, 0.10f, 0.0f)) * Mat4::rotationX(-PI * 0.5f), white);
-            draw(lib.tankBarrel, tube * Mat4::translation(Vec3(0.0f, -recoil_ * 0.45f, 0.0f)), white);
+            draw(lib.mantlet, tube * Mat4::translation(Vec3(0.0f, 0.10f, 0.0f)) *
+                                  Mat4::rotationX(-PI * 0.5f) * Mat4::scaling(Vec3(1.3f, 1.2f, 1.2f)), white);
+            draw(lib.tankGun, tube * Mat4::translation(Vec3(0.0f, -recoil_ * 0.45f, 0.0f)), white);
             if (near) {
-                draw(lib.brake, tube * Mat4::translation(Vec3(0.0f, 2.45f - recoil_ * 0.45f, 0.0f)), white);
-                draw(lib.commanderCupola, tur * Mat4::translation(Vec3(-0.45f, 0.38f, -0.35f)), white);
-                draw(lib.stowage, tur * Mat4::translation(Vec3(0.0f, 0.10f, -0.95f)) *
-                                      Mat4::rotationY(PI * 0.5f), white);
-                draw(lib.smokeTubes, tur * Mat4::translation(Vec3(-0.75f, 0.15f, 0.55f)), white);
-                draw(lib.smokeTubes, tur * Mat4::translation(Vec3(0.75f, 0.15f, 0.55f)), white);
+                draw(lib.brake, tube * Mat4::translation(Vec3(0.0f, 3.9f - recoil_ * 0.45f, 0.0f)), white);
+                draw(lib.cheek, tur * Mat4::translation(Vec3(-0.95f, 0.30f, 0.95f)) * Mat4::rotationY(0.35f), white);
+                draw(lib.cheek, tur * Mat4::translation(Vec3(0.95f, 0.30f, 0.95f)) * Mat4::rotationY(-0.35f), white);
+                draw(lib.commanderCupola, tur * Mat4::translation(Vec3(-0.55f, 0.66f, -0.45f)), white);
+                draw(lib.gunpod, tur * Mat4::translation(Vec3(-0.55f, 0.95f, -0.25f)) *
+                                     Mat4::rotationX(PI * 0.5f - 0.15f), kArmorDark);
+                draw(lib.hatch, tur * Mat4::translation(Vec3(0.55f, 0.68f, -0.45f)), white);
+                draw(lib.stowage, tur * Mat4::translation(Vec3(-1.25f, 0.25f, -0.35f)), white);
+                draw(lib.stowage, tur * Mat4::translation(Vec3(1.25f, 0.25f, -0.35f)), white);
+                draw(lib.smokeTubes, tur * Mat4::translation(Vec3(-1.05f, 0.42f, 0.55f)) * Mat4::rotationY(0.5f), white);
+                draw(lib.smokeTubes, tur * Mat4::translation(Vec3(1.05f, 0.42f, 0.55f)) * Mat4::rotationY(-0.5f), white);
                 for (int sx = -1; sx <= 1; sx += 2)
-                    draw(lib.exhaust, hull * Mat4::translation(Vec3(sx * 0.55f, 1.15f, -1.35f)) *
-                                          Mat4::rotationX(-0.5f), white);
-                draw(lib.antenna, tur * Mat4::translation(Vec3(0.7f, 0.35f, -0.6f)) *
+                    draw(lib.exhaust, hull * Mat4::translation(Vec3(sx * 0.95f, 1.45f, -2.85f)) *
+                                          Mat4::rotationX(-0.6f), white);
+                draw(lib.antenna, tur * Mat4::translation(Vec3(0.95f, 0.60f, -1.1f)) *
                                       Mat4::rotationZ(0.08f + std::sin(animPhase_ * 0.7f) * 0.03f), white);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(-1.05f, 1.32f, 2.9f)), white, 0.85f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(1.05f, 1.32f, 2.9f)), white, 0.85f);
             }
             break;
         }
@@ -1048,66 +1321,199 @@ void Unit::submit(Rasterizer& raster, const Vec3& viewPos) const {
         case UnitKind::Jammer: {
             // A carrier with the turret replaced by a dish that never stops
             // turning. If you can see the dish, it can see you.
-            draw(lib.apcHull, hull * Mat4::translation(Vec3(0.0f, 0.55f, 0.0f)), white);
+            // The same carrier as the APC, minus the turret, with a mast and a
+            // dish where the gun would be and an equipment shelter behind.
+            draw(lib.apcLower, hull * Mat4::translation(Vec3(0.0f, 0.42f, 0.0f)), white);
+            draw(lib.apcUpper, hull * Mat4::translation(Vec3(0.0f, 1.02f, -0.35f)), white);
+            draw(lib.apcGlacis, hull * Mat4::translation(Vec3(0.0f, 1.02f, 1.55f)), white);
             {
                 const float spin = animPhase_;
                 for (int sx = -1; sx <= 1; sx += 2)
-                    for (int i = 0; i < 3; ++i) {
-                        const Mat4 w = hull * Mat4::translation(Vec3(sx * 1.05f, 0.34f, -0.95f + i * 0.95f)) *
+                    for (int i = 0; i < 4; ++i) {
+                        const Mat4 w = hull * Mat4::translation(Vec3(sx * 1.15f, 0.46f, -1.65f + i * 1.1f)) *
                                        Mat4::rotationZ(PI * 0.5f) * Mat4::rotationY(spin);
-                        draw(lib.wheel, w, white);
-                        if (near) draw(lib.hub, w * Mat4::translation(Vec3(0.0f, sx > 0 ? -0.05f : 0.05f, 0.0f)),
+                        draw(lib.wheelBig, w, white);
+                        if (near) draw(lib.hub, w * Mat4::translation(Vec3(0.0f, sx > 0 ? -0.10f : 0.10f, 0.0f)),
                                        Vec3(1.15f, 1.15f, 1.15f));
                     }
             }
-            draw(lib.dishMast, hull * Mat4::translation(Vec3(0.0f, 1.35f, -0.15f)), white);
+            draw(lib.drum, hull * Mat4::translation(Vec3(0.0f, 1.95f, -1.0f)) * Mat4::rotationX(PI * 0.5f) *
+                               Mat4::scaling(Vec3(2.2f, 1.6f, 2.2f)), kArmorGrey);
+            draw(lib.dishMast, hull * Mat4::translation(Vec3(0.0f, 1.80f, 0.05f)) * Mat4::scaling(Vec3(1.0f, 1.4f, 1.0f)), white);
             // The dish sweeps on its own clock, not the gun's: it is looking
             // for you, not aiming at you.
             draw(lib.dish,
-                 hull * Mat4::translation(Vec3(0.0f, 2.05f, -0.15f)) *
+                 hull * Mat4::translation(Vec3(0.0f, 3.2f, 0.05f)) *
                      Mat4::rotationY(animPhase_ * 0.9f + speedNow * 0.0f) * Mat4::rotationX(-0.55f),
                  kLens, 0.55f);
             if (near) {
-                draw(lib.antenna, hull * Mat4::translation(Vec3(-0.9f, 1.3f, 0.7f)) *
+                draw(lib.antenna, hull * Mat4::translation(Vec3(-1.0f, 1.8f, 0.7f)) *
                                       Mat4::rotationZ(-0.16f), white);
-                draw(lib.antenna, hull * Mat4::translation(Vec3(0.9f, 1.3f, 0.7f)) *
+                draw(lib.antenna, hull * Mat4::translation(Vec3(1.0f, 1.8f, 0.7f)) *
                                       Mat4::rotationZ(0.16f), white);
-                draw(lib.stowage, hull * Mat4::translation(Vec3(0.0f, 1.38f, -0.95f)) *
-                                      Mat4::rotationY(PI * 0.5f), white);
-                draw(lib.viewport, hull * Mat4::translation(Vec3(0.0f, 0.95f, 1.06f)), white, 0.3f);
+                draw(lib.apcRamp, hull * Mat4::translation(Vec3(0.0f, 1.05f, -2.32f)), white);
+                draw(lib.viewport, hull * Mat4::translation(Vec3(0.35f, 1.55f, 1.86f)) *
+                                       Mat4::rotationX(0.55f), white, 0.3f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(-0.85f, 0.95f, 2.34f)), white, 0.85f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(0.85f, 0.95f, 2.34f)), white, 0.85f);
+                draw(lib.lamp, hull * Mat4::translation(Vec3(0.0f, 2.85f, -1.0f)), white,
+                     0.5f + 0.5f * std::sin(animPhase_ * 3.0f));
             }
             break;
         }
         case UnitKind::Warden: {
-            // A four-legged repair gantry: tall, slow, and unmistakable, with
-            // arms that work whether or not it is shooting at you. The legs
-            // step in diagonal pairs and only when it moves.
-            const float step = std::sin(animPhase_) * 0.35f * std::max(stride_, 0.15f);
-            const float lift = std::max(0.0f, std::sin(animPhase_)) * 0.18f * stride_;
-            draw(lib.apcHull, hull * Mat4::translation(Vec3(0.0f, 1.35f + std::fabs(std::sin(animPhase_)) * 0.04f * stride_, 0.0f)), white);
+            // A hunched four-legged field crane: a boxy body slung between
+            // splayed two-segment legs, a cab at the front with a lit visor,
+            // a crane boom over the back and two tool arms working in front.
+            // The legs step in diagonal pairs and only when it moves.
+            const float step = std::sin(animPhase_) * 0.32f * std::max(stride_, 0.15f);
+            const float bodyY = 2.05f + std::fabs(std::sin(animPhase_)) * 0.05f * stride_;
+            const Mat4 body = hull * Mat4::translation(Vec3(0.0f, bodyY, 0.0f)) * Mat4::rotationX(0.08f);
+            draw(lib.wardenBody, body, white);
+            draw(lib.wardenCab, body * Mat4::translation(Vec3(0.0f, 0.25f, 1.15f)), white);
+            draw(lib.visor, body * Mat4::translation(Vec3(0.0f, 0.35f, 1.58f)) * Mat4::scaling(Vec3(3.5f, 2.5f, 1.0f)),
+                 kLens, 0.7f);
             for (int sx = -1; sx <= 1; sx += 2)
                 for (int sz = -1; sz <= 1; sz += 2) {
                     const float pair = static_cast<float>(sx * sz);
                     const float ang = step * pair;
-                    const float up = (pair > 0.0f) ? lift : std::max(0.0f, -std::sin(animPhase_)) * 0.18f * stride_;
-                    const Mat4 leg = hull * Mat4::translation(Vec3(sx * 0.95f, 1.30f, sz * 0.75f)) *
-                                     Mat4::rotationX(ang) * Mat4::rotationZ(sx * 0.18f);
-                    draw(lib.walkLeg, leg * Mat4::translation(Vec3(0.0f, -0.62f + up * 0.5f, 0.0f)), white);
-                    if (near) draw(lib.boot, leg * Mat4::translation(Vec3(0.0f, -1.28f + up, 0.0f)) *
-                                              Mat4::scaling(Vec3(2.0f, 2.0f, 2.0f)), white);
+                    const float lift = (pair > 0.0f ? std::max(0.0f, std::sin(animPhase_))
+                                                    : std::max(0.0f, -std::sin(animPhase_))) * 0.35f * stride_;
+                    // Hip: out and down from the body corner; shin: back in
+                    // to the foot, so the leg reads as a bent limb.
+                    const Mat4 hip = hull * Mat4::translation(Vec3(sx * 0.85f, bodyY - 0.15f, sz * 0.95f)) *
+                                     Mat4::rotationX(ang) * Mat4::rotationZ(sx * 0.62f - sx * lift * 0.5f);
+                    draw(lib.wardenHip, hip * Mat4::translation(Vec3(0.0f, -0.55f, 0.0f)), white);
+                    const Mat4 knee = hip * Mat4::translation(Vec3(0.0f, -1.10f, 0.0f)) *
+                                      Mat4::rotationZ(-sx * 1.05f + sx * lift * 0.4f);
+                    draw(lib.wardenShin, knee * Mat4::translation(Vec3(0.0f, -0.62f, 0.0f)), white);
+                    if (near) draw(lib.boot, knee * Mat4::translation(Vec3(0.0f, -1.26f, 0.0f)) *
+                                              Mat4::scaling(Vec3(2.4f, 2.0f, 2.4f)), white);
                 }
-            // Two arms sweeping over the deck: the repair rig at work.
+            // Two arms working over the front deck: the repair rig at work.
             const float sweep = std::sin(animPhase_ * 2.2f + pos_.x) * 0.6f;
-            draw(lib.repairArm,
-                 hull * Mat4::translation(Vec3(-0.7f, 2.0f, 0.25f)) *
-                     Mat4::rotationY(sweep) * Mat4::rotationX(0.5f), kAccent);
-            draw(lib.repairArm,
-                 hull * Mat4::translation(Vec3(0.7f, 2.0f, 0.25f)) *
-                     Mat4::rotationY(-sweep) * Mat4::rotationX(0.5f), kAccent);
-            draw(lib.cupola, gun * Mat4::translation(Vec3(0.0f, 2.1f, -0.35f)), white);
-            if (near)
-                draw(lib.drum, hull * Mat4::translation(Vec3(0.0f, 2.1f, -0.95f)) *
-                                   Mat4::rotationX(PI * 0.5f), white);
+            for (int sx = -1; sx <= 1; sx += 2) {
+                const Mat4 arm = body * Mat4::translation(Vec3(sx * 0.6f, 0.30f, 1.0f)) *
+                                 Mat4::rotationY(-sx * sweep) * Mat4::rotationX(-0.55f);
+                draw(lib.repairArm, arm * Mat4::translation(Vec3(0.0f, 0.0f, 0.85f)), kAccent);
+                if (near) draw(lib.toolTip, arm * Mat4::translation(Vec3(0.0f, 0.0f, 1.7f)) *
+                                                Mat4::rotationX(PI * 0.5f), white);
+            }
+            // The crane boom over the back, with a lamp on its tip.
+            const float boomA = -0.75f + std::sin(animPhase_ * 0.6f) * 0.08f;
+            const Mat4 boom = body * Mat4::translation(Vec3(0.0f, 0.45f, -0.6f)) * Mat4::rotationX(boomA);
+            draw(lib.craneArm, boom * Mat4::translation(Vec3(0.0f, 0.0f, -1.35f)), white);
+            if (near) {
+                draw(lib.lamp, boom * Mat4::translation(Vec3(0.0f, -0.12f, -2.65f)), white, 0.9f);
+                draw(lib.drum, body * Mat4::translation(Vec3(0.55f, 0.55f, -0.5f)) * Mat4::rotationX(PI * 0.5f), white);
+                draw(lib.drum, body * Mat4::translation(Vec3(-0.55f, 0.55f, -0.5f)) * Mat4::rotationX(PI * 0.5f), white);
+                draw(lib.antenna, body * Mat4::translation(Vec3(-0.7f, 0.4f, 0.6f)) * Mat4::rotationZ(-0.2f), white);
+            }
+            break;
+        }
+        // ---- the third tier ---------------------------------------------
+        case UnitKind::Gunship: {
+            // A twin-rotor gunship: fat fuselage, stub wings with a rotor on
+            // each tip, a tail boom, a gimballed cannon under the nose.
+            const float bank = clampf(-yawRate_ * 0.25f, -0.35f, 0.35f);
+            const float nose = clampf(speedNow * 0.02f, 0.0f, 0.25f);
+            const Mat4 air = Mat4::translation(pos_) * Mat4::rotationY(yaw_) *
+                             Mat4::rotationX(nose) * Mat4::rotationZ(bank);
+            draw(lib.gunshipBody, air * Mat4::translation(Vec3(0.0f, -0.4f, 0.0f)), white);
+            draw(lib.gunshipWing, air * Mat4::translation(Vec3(0.0f, 0.55f, 0.2f)), white);
+            draw(lib.gunshipTail, air * Mat4::translation(Vec3(0.0f, 0.3f, -3.1f)), white);
+            draw(lib.wardenCab, air * Mat4::translation(Vec3(0.0f, 0.15f, 1.9f)) *
+                                    Mat4::scaling(Vec3(1.1f, 0.9f, 0.9f)), white);
+            draw(lib.visor, air * Mat4::translation(Vec3(0.0f, 0.3f, 2.4f)) * Mat4::scaling(Vec3(4.0f, 3.0f, 1.0f)),
+                 kLens, 0.6f);
+            for (int sx = -1; sx <= 1; sx += 2) {
+                const Mat4 hub = air * Mat4::translation(Vec3(sx * 2.4f, 0.7f, 0.2f));
+                draw(lib.rotorGuard, hub, white);
+                draw(lib.rotor, hub * Mat4::rotationY(animPhase_ * 1.3f + sx), white);
+                draw(lib.rotor, hub * Mat4::rotationY(animPhase_ * 1.3f + sx + PI * 0.5f), white);
+            }
+            {
+                const Mat4 pod = Mat4::translation(pos_) * Mat4::rotationY(gunYaw_) *
+                                 Mat4::translation(Vec3(0.0f, -1.05f, 1.6f)) *
+                                 Mat4::rotationX(PI * 0.5f - gunPitch_);
+                draw(lib.gunpod, pod * Mat4::scaling(Vec3(1.6f, 1.8f, 1.6f)) *
+                                     Mat4::translation(Vec3(0.0f, -recoil_ * 0.05f, 0.0f)), kArmorDark);
+            }
+            if (near) {
+                draw(lib.lamp, air * Mat4::translation(Vec3(0.0f, -0.2f, -4.3f)), white,
+                     std::fmod(animPhase_, 6.0f) < 0.5f ? 1.0f : 0.1f);
+                draw(lib.exhaust, air * Mat4::translation(Vec3(-0.6f, 0.5f, -1.4f)) * Mat4::rotationX(-1.2f), white);
+                draw(lib.exhaust, air * Mat4::translation(Vec3(0.6f, 0.5f, -1.4f)) * Mat4::rotationX(-1.2f), white);
+            }
+            break;
+        }
+        case UnitKind::Launcher: {
+            // The APC chassis carrying a twelve-tube rocket pod on an
+            // elevating cradle. The pod rises to fire and drops to drive.
+            draw(lib.apcLower, hull * Mat4::translation(Vec3(0.0f, 0.42f, 0.0f)), white);
+            draw(lib.wardenCab, hull * Mat4::translation(Vec3(0.0f, 1.35f, 1.6f)) *
+                                    Mat4::scaling(Vec3(1.8f, 1.0f, 1.2f)), white);
+            {
+                const float spin = animPhase_;
+                for (int sx = -1; sx <= 1; sx += 2)
+                    for (int i = 0; i < 4; ++i) {
+                        const Mat4 w = hull * Mat4::translation(Vec3(sx * 1.15f, 0.46f, -1.65f + i * 1.1f)) *
+                                       Mat4::rotationZ(PI * 0.5f) * Mat4::rotationY(spin);
+                        draw(lib.wheelBig, w, white);
+                    }
+            }
+            const float elev = (burstTimer_ > 0.0f || pauseTimer_ < 2.0f) ? 0.55f : 0.15f;
+            const Mat4 cradle = gun * Mat4::translation(Vec3(0.0f, 1.55f, -0.6f)) *
+                                Mat4::rotationX(-elev);
+            draw(lib.rocketPod, cradle * Mat4::translation(Vec3(0.0f, 0.55f, 0.6f)), white);
+            if (near) {
+                for (int r = 0; r < 3; ++r)
+                    for (int c = -1; c <= 1; ++c)
+                        draw(lib.exhaust, cradle * Mat4::translation(Vec3(c * 0.55f, 0.25f + r * 0.32f, 2.1f)) *
+                                              Mat4::rotationX(PI * 0.5f) * Mat4::scaling(Vec3(1.6f, 0.3f, 1.6f)),
+                             Vec3(0.2f, 0.2f, 0.22f));
+                draw(lib.viewport, hull * Mat4::translation(Vec3(0.0f, 1.55f, 2.2f)), white, 0.3f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(-0.85f, 0.95f, 2.34f)), white, 0.85f);
+                draw(lib.headlight, hull * Mat4::translation(Vec3(0.85f, 0.95f, 2.34f)), white, 0.85f);
+                draw(lib.antenna, hull * Mat4::translation(Vec3(-0.95f, 1.80f, 0.4f)) * Mat4::rotationZ(-0.12f), white);
+            }
+            break;
+        }
+        case UnitKind::ShieldPylon: {
+            // A mast with a lit ring at the top, and the shield itself drawn
+            // as a ring of nodes at its rim so the pilot can see where it
+            // stops. The ring pulses; the nodes drift up and down.
+            const Mat4 base = Mat4::translation(pos_) * Mat4::rotationY(yaw_);
+            draw(lib.pylonBase, base, white);
+            draw(lib.pylonMast, base * Mat4::translation(Vec3(0.0f, 1.0f, 0.0f)), white);
+            const float pulse = 0.55f + 0.45f * std::sin(animPhase_ * 0.5f);
+            draw(lib.pylonRing, base * Mat4::translation(Vec3(0.0f, 5.6f, 0.0f)), kLens, pulse);
+            draw(lib.shieldNode, base * Mat4::translation(Vec3(0.0f, 6.3f, 0.0f)) * Mat4::scaling(Vec3(1.4f)),
+                 kLens, pulse);
+            {
+                const float R = stats().supportRadius;
+                for (int i = 0; i < 18; ++i) {
+                    const float a = TAU * i / 18.0f + animPhase_ * 0.03f;
+                    const float y = 1.2f + 2.4f * (0.5f + 0.5f * std::sin(animPhase_ * 0.4f + i * 1.7f));
+                    draw(lib.shieldNode, Mat4::translation(pos_ + Vec3(std::sin(a) * R, y, std::cos(a) * R)),
+                         kLens, 0.35f + 0.3f * pulse);
+                }
+            }
+            break;
+        }
+        case UnitKind::Sapper: {
+            // A mine on legs: a low dome with four stub legs scrabbling and a
+            // lamp that blinks faster the closer it gets.
+            draw(lib.sapperDome, hull * Mat4::translation(Vec3(0.0f, 0.45f, 0.0f)) *
+                                     Mat4::scaling(Vec3(1.0f, 0.65f, 1.0f)), white);
+            for (int i = 0; i < 4; ++i) {
+                const float a = i * PI * 0.5f + PI * 0.25f;
+                const float step = std::sin(animPhase_ * 2.0f + i * 1.6f) * 0.5f * std::max(stride_, 0.1f);
+                draw(lib.sapperLeg, hull * Mat4::translation(Vec3(0.0f, 0.35f, 0.0f)) * Mat4::rotationY(a + step) *
+                                        Mat4::translation(Vec3(0.0f, 0.0f, 0.55f)) * Mat4::rotationX(0.6f), white);
+            }
+            draw(lib.lamp, hull * Mat4::translation(Vec3(0.0f, 0.9f, 0.0f)), Vec3(1.0f, 0.3f, 0.2f),
+                 std::fmod(animPhase_, alerted_ ? 1.2f : 4.0f) < 0.3f ? 1.0f : 0.1f);
             break;
         }
         default: break;

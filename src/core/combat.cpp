@@ -84,6 +84,21 @@ void Combat::ensureMeshes() const {
     meshesBuilt_ = true;
 }
 
+Vec3 ballisticAim(const Vec3& muzzle, const Vec3& target, float speed, float gravity) {
+    Vec3 to = target - muzzle;
+    const float d = length(to);
+    if (d < 1e-3f) return Vec3(0.0f, 0.0f, 1.0f);
+    if (speed < 1e-3f || gravity >= 0.0f) return to / d;
+    float rise = 0.0f;
+    for (int pass = 0; pass < 2; ++pass) {
+        const Vec3 aim = target + Vec3(0.0f, rise, 0.0f);
+        rise = ballisticDrop(length(aim - muzzle), speed, gravity);
+    }
+    const Vec3 lofted = (target + Vec3(0.0f, rise, 0.0f)) - muzzle;
+    const float l = length(lofted);
+    return (l > 1e-4f) ? lofted / l : to / d;
+}
+
 void Combat::spawnShots(const std::vector<ShotRequest>& shots, Rng& rng) {
     for (const ShotRequest& s : shots) {
         if (!s.weapon) continue;
@@ -109,7 +124,8 @@ void Combat::spawnShots(const std::vector<ShotRequest>& shots, Rng& rng) {
             pr.pos = s.origin;
             pr.prev = s.origin;
             pr.vel = dir * w.projectileSpeed;
-            pr.gravity = w.gravity;
+            // A weapon may arc harder than gravity; none of them arc less.
+            pr.gravity = shotGravity(w);
             // Pellets split the listed damage between them, so a flak burst that
             // lands whole is worth the same as a solid slug of the same rating.
             const float teamScale = (s.team == Team::Player) ? 1.0f : hostileDamage_;

@@ -329,6 +329,19 @@ StructurePiece buildRuin(const RuinSpec& spec) {
     }
     // Roof deck, so a climber has somewhere to stand at the top.
     out.obstacles.push_back(box(Vec3(0.0f, topY + 0.1f, 0.0f), Vec3(hw, 0.3f, hd), ObstacleKind::Building));
+    // The far-field stand-in: the shell as four slabs and a deck, in the
+    // same concrete. Hollow like the real thing so a roofline reads as a
+    // roofline, and nothing more.
+    {
+        const Vec3 col = spec.tint;
+        auto slab = [&](const Vec3& c, const Vec3& h) { addBox(out.lod, c, h, col); };
+        slab(Vec3(0.0f, topY * 0.5f, -hd), Vec3(hw, topY * 0.5f, wallT));
+        slab(Vec3(0.0f, topY * 0.5f,  hd), Vec3(hw, topY * 0.5f, wallT));
+        slab(Vec3(-hw, topY * 0.5f, 0.0f), Vec3(wallT, topY * 0.5f, hd));
+        slab(Vec3( hw, topY * 0.5f, 0.0f), Vec3(wallT, topY * 0.5f, hd));
+        slab(Vec3(0.0f, topY + 0.1f, 0.0f), Vec3(hw, 0.25f, hd));
+        out.lod.computeBounds();
+    }
     return out;
 }
 
